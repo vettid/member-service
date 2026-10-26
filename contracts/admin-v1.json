@@ -1,0 +1,25 @@
+{
+  "contract_id": "admin-v1",
+  "status": "draft",
+  "note": "Draft terms per MEMBER-SERVICE-PLAN §5.2. Issued only to the admin set, in addition to member-v1. The wire encoding is defined by a later VAULT-MESSAGING revision (plan §10, item 3.1).",
+  "extends": "member-v1",
+  "scopes": [
+    {
+      "id": "governance-approval",
+      "rule": "The service may ask the admin to approve a governance action as one of n admins.",
+      "actions": [
+        "proposal.create",
+        "vote.open",
+        "vote.close",
+        "contract_template.change",
+        "admin_set.change",
+        "assignment.push"
+      ]
+    }
+  ],
+  "threshold": {
+    "m": 1,
+    "configurable": true,
+    "note": "v1 runs 1-of-n; m can be raised by configuration without a code change. Every approval is signed and audited regardless of threshold."
+  }
+}

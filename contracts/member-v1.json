@@ -1,0 +1,42 @@
+{
+  "contract_id": "member-v1",
+  "status": "draft",
+  "note": "Draft terms per MEMBER-SERVICE-PLAN §5.1. The wire encoding and signing of contracts are defined by a later VAULT-MESSAGING revision (plan §10, item 3.1); this file records the terms, not the encoding.",
+  "service": {
+    "name": "vettid.org member service",
+    "origin": "https://member.vettid.org"
+  },
+  "disclosure": {
+    "from_vault": ["display_name", "membership_status"],
+    "entered_on_site": ["email"],
+    "email_storage": "HMAC under a server-side pepper, for sign-in lookup only"
+  },
+  "scopes": [
+    {
+      "id": "signin",
+      "rule": "The service may send sign-in challenges when the member's email is entered on the site."
+    },
+    {
+      "id": "voting",
+      "rule": "The service may present proposals and certify one voting key per proposal."
+    },
+    {
+      "id": "beta",
+      "rule": "The service may assign tasks and request feedback; the member signs completions."
+    },
+    {
+      "id": "messaging",
+      "rule": "general and message class notifications; urgent only for governance deadlines.",
+      "classes": ["general", "message", "urgent"]
+    }
+  ],
+  "status_model": {
+    "initial": "provisional",
+    "provisional": "Beta participant; votes are non-binding.",
+    "member": "Converts in place from provisional when a subscription is paid."
+  },
+  "revocation": {
+    "member": "The member may sever the connection from the phone at any time.",
+    "service": "The service may revoke on membership lapse."
+  }
+}

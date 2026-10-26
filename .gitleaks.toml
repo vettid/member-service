@@ -1,0 +1,4 @@
+# gitleaks: the default rules. Test keys come only from fixed, public test
+# seeds; no real keys, API keys, peppers or member data are committed.
+[extend]
+useDefault = true
