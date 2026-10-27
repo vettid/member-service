@@ -1,0 +1,11 @@
+.git
+.github
+.env
+bin
+cdk
+contracts
+docs
+local-mail
+site-test
+web
+*.md

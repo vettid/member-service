@@ -3,8 +3,9 @@
 // the VettID service vault through its SDK and webhooks, exactly as a
 // third-party application would (MEMBER-SERVICE-PLAN §3, §7.3).
 //
-//	member-api serve     serve the API (configuration from the environment)
-//	member-api version   print the version
+//	member-api serve        serve the API (configuration from the environment)
+//	member-api healthcheck  probe GET /api/health on MEMBER_API_ADDR; exit 0 or 1
+//	member-api version      print the version
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,12 +39,17 @@ var version = "dev"
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: member-api serve | version\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: member-api serve | healthcheck | version\n")
 	}
 	flag.Parse()
 	switch flag.Arg(0) {
 	case "version":
 		fmt.Println(version)
+	case "healthcheck":
+		if err := healthcheck(os.Getenv("MEMBER_API_ADDR")); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
 	case "serve":
 		log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 		if err := serve(log, os.Getenv); err != nil {
@@ -184,4 +191,26 @@ func serve(log *slog.Logger, getenv func(string) string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// healthcheck asks the local server's /api/health, for the container's
+// health check (the image has no shell).
+func healthcheck(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("MEMBER_API_ADDR: %w", err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	c := &http.Client{Timeout: 3 * time.Second}
+	res, err := c.Get("http://" + net.JoinHostPort(host, port) + "/api/health")
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", res.StatusCode)
+	}
+	return nil
 }
