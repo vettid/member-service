@@ -27,7 +27,7 @@ func TestValid(t *testing.T) {
 // The code is in the subject and the body; Dir writes 0600 files.
 func TestDir(t *testing.T) {
 	d := &Dir{Path: t.TempDir()}
-	if err := d.SendCode(context.Background(), "a@example.org", "123456"); err != nil {
+	if err := d.SendCode(context.Background(), "a@example.org", "123456", Connect); err != nil {
 		t.Fatal(err)
 	}
 	files, _ := filepath.Glob(filepath.Join(d.Path, "*.eml"))

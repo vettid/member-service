@@ -198,6 +198,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/connect/status", s.connectStatus)
 	mux.HandleFunc("POST /api/signin/start", s.signInStart)
 	mux.HandleFunc("GET /api/signin/status", s.signInStatus)
+	mux.HandleFunc("POST /api/signin/confirm", s.signInConfirmStart)
+	mux.HandleFunc("POST /api/signin/verify", s.signInConfirmVerify)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/members", s.members)
 	mux.HandleFunc("POST /api/signout", s.signOut)
@@ -348,12 +350,39 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := s.now()
 	f := &flow{EmailKey: s.mac("email", addr), Stage: stageCode, Exp: now.Add(CodeTTL)}
-	// The source first: a source over its limit does not use up the
-	// address's codes (so it cannot lock someone out of theirs).
+	id, err := token()
+	if err != nil {
+		s.fail(w, "token", err)
+		return
+	}
+	code, err := s.newCode(ctx, r, f.EmailKey, tokenKey(id)[:16])
+	if err != nil {
+		s.fail(w, "code", err)
+		return
+	}
+	if code == "" {
+		f.Stage = stageLimited
+	} else {
+		f.CodeMAC = s.mac("code", id+"\x00"+code)
+	}
+	if err := s.putJSON(ctx, kindFlow, tokenKey(id), f, f.Exp, true); err != nil {
+		s.fail(w, "store", err)
+		return
+	}
+	s.sendCode(addr, code, mail.Connect, tokenKey(id)[:16])
+	setCookie(w, FlowCookie, id, CodeTTL+5*time.Minute)
+	writeJSON(w, http.StatusAccepted, map[string]any{"expires_at": f.Exp.UTC()})
+}
+
+// newCode makes a one-time code for an address, or "" when a limit was
+// reached (no code is sent; the caller answers as if one were). The
+// source is counted first: a source over its limit does not use up the
+// address's codes, so it cannot lock someone out of theirs. flowLog
+// names the flow in the log.
+func (s *Server) newCode(ctx context.Context, r *http.Request, emailKey, flowLog string) (string, error) {
 	overSource, err := s.limited(ctx, "code:source:"+s.mac("source", sourceKey(s.clientIP(r))), CodesPerSource, RateWindow)
 	if err != nil {
-		s.fail(w, "rate", err)
-		return
+		return "", err
 	}
 	overEmail := false
 	if !overSource {
@@ -362,48 +391,71 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 			n   int
 			win time.Duration
 		}{{"code:email:", CodesPerEmail, RateWindow}, {"code:email-day:", CodesPerDay, dayWindow}} {
-			over, err := s.limited(ctx, l.key+f.EmailKey, l.n, l.win)
+			over, err := s.limited(ctx, l.key+emailKey, l.n, l.win)
 			if err != nil {
-				s.fail(w, "rate", err)
-				return
+				return "", err
 			}
 			overEmail = overEmail || over
 		}
 	}
-	id, err := token()
-	if err != nil {
-		s.fail(w, "token", err)
-		return
-	}
-	var code string
 	if overEmail || overSource {
-		f.Stage = stageLimited
-		s.log().Info("connect code limited", "flow", tokenKey(id)[:16], "email", overEmail, "source", overSource)
-	} else {
-		n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
-		if err != nil {
-			s.fail(w, "code", err)
-			return
-		}
-		code = leftPad6(n.Int64())
-		f.CodeMAC = s.mac("code", id+"\x00"+code)
+		s.log().Info("code limited", "flow", flowLog, "email", overEmail, "source", overSource)
+		return "", nil
 	}
-	if err := s.putJSON(ctx, kindFlow, tokenKey(id), f, f.Exp, true); err != nil {
-		s.fail(w, "store", err)
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return "", err
+	}
+	return leftPad6(n.Int64()), nil
+}
+
+// sendCode mails a code in the background ("" sends nothing).
+func (s *Server) sendCode(addr, code string, kind mail.Kind, flowLog string) {
+	if code == "" {
 		return
 	}
-	if code != "" {
-		fk := tokenKey(id)[:16]
-		s.goAsync(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := s.Mail.SendCode(ctx, addr, code); err != nil {
-				s.log().Warn("connect code not sent", "flow", fk, "err", errName(err))
-			}
-		})
+	s.goAsync(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.Mail.SendCode(ctx, addr, code, kind); err != nil {
+			s.log().Warn("code not sent", "flow", flowLog, "err", errName(err))
+		}
+	})
+}
+
+// tryCode counts a code attempt and reports whether it succeeds: match
+// (the caller's constant-time check of address and code) within
+// CodeAttempts tries, counted atomically under attemptsKey until exp,
+// from a source not past FailedPerSource wrong codes this hour. A
+// failure counts against the source and toward the alarm.
+func (s *Server) tryCode(ctx context.Context, r *http.Request, attemptsKey string, exp time.Time, match bool) (bool, error) {
+	hour := s.now().UTC().Truncate(RateWindow).Format(time.RFC3339)
+	srcFailed := "verify:failed-source:" + s.mac("source", sourceKey(s.clientIP(r))) + ":" + hour
+	if failed, err := s.Store.Count(ctx, kindRate, srcFailed); err != nil {
+		return false, err
+	} else if failed >= FailedPerSource {
+		return false, nil
 	}
-	setCookie(w, FlowCookie, id, CodeTTL+5*time.Minute)
-	writeJSON(w, http.StatusAccepted, map[string]any{"expires_at": f.Exp.UTC()})
+	// Every try counts before the result is used: the count holds even if
+	// two tasks overlap.
+	n, err := s.Store.Incr(ctx, kindRate, attemptsKey, exp)
+	if err != nil {
+		return false, err
+	}
+	if n <= CodeAttempts && match {
+		return true, nil
+	}
+	if _, err := s.Store.Incr(ctx, kindRate, srcFailed, s.now().Add(RateWindow)); err != nil {
+		return false, err
+	}
+	g, err := s.Store.Incr(ctx, kindRate, "verify:failed:"+hour, s.now().Add(RateWindow))
+	if err != nil {
+		return false, err
+	}
+	if g == FailedAlarm {
+		s.log().Error("wrong codes reached the alarm level this hour", "alarm", "verify_failed", "count", FailedAlarm)
+	}
+	return false, nil
 }
 
 func leftPad6(n int64) string {
@@ -445,39 +497,14 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A source past its wrong codes for the hour is refused, right or
-	// wrong, until the hour ends.
-	hour := s.now().UTC().Truncate(RateWindow).Format(time.RFC3339)
-	srcFailed := "verify:failed-source:" + s.mac("source", sourceKey(s.clientIP(r))) + ":" + hour
-	if failed, err := s.Store.Count(ctx, kindRate, srcFailed); err != nil {
-		s.fail(w, "rate", err)
-		return
-	} else if failed >= FailedPerSource {
-		writeError(w, http.StatusBadRequest, "invalid_code")
-		return
-	}
-	// Every try counts, atomically, before the code is compared: the
-	// count holds even if two tasks overlap.
-	n, err := s.Store.Incr(ctx, kindRate, "verify:"+fk, f.Exp)
-	if err != nil {
-		s.fail(w, "rate", err)
-		return
-	}
+	// wrong, until the hour ends (tryCode).
 	addr := mail.Normalize(req.Email)
 	okEmail := hmac.Equal([]byte(s.mac("email", addr)), []byte(f.EmailKey))
 	okCode := f.Stage == stageCode && hmac.Equal([]byte(s.mac("code", id+"\x00"+req.Code)), []byte(f.CodeMAC))
-	if n > CodeAttempts || !okEmail || !okCode {
-		if _, err := s.Store.Incr(ctx, kindRate, srcFailed, s.now().Add(RateWindow)); err != nil {
-			s.fail(w, "rate", err)
-			return
-		}
-		g, err := s.Store.Incr(ctx, kindRate, "verify:failed:"+hour, s.now().Add(RateWindow))
-		if err != nil {
-			s.fail(w, "rate", err)
-			return
-		}
-		if g == FailedAlarm {
-			s.log().Error("wrong codes reached the alarm level this hour", "alarm", "verify_failed", "count", FailedAlarm)
-		}
+	if ok, err := s.tryCode(ctx, r, "verify:"+fk, f.Exp, okEmail && okCode); err != nil {
+		s.fail(w, "rate", err)
+		return
+	} else if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_code")
 		return
 	}
@@ -760,6 +787,7 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 		}
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) {
 			f.Stage, f.ConnID, f.KeyChanged = signInApproved, h.ConnectionID, ev.KeyChanged
+			s.keyChanged(f)
 		})
 	case *servicevault.AdminSetChanged:
 		s.setAdmins(ev.Admins, true, 0)

@@ -1,6 +1,6 @@
 # vettid.org Member Service & Service Vault — Plan
 
-**Version:** 0.6.2 (draft)
+**Version:** 0.6.3 (draft)
 **Status:** Planning — Phase 1 targeted before 2026-11-15
 **Owner:** Al Liebl
 **Repos:** `vettid/service-vault` (new; replaces the retired `vettid/vettid-service-vault`), `vettid/member-service` (new), `vettid/vettid-vault` (member vault: service connections, contracts, votes), `vettid/vettid-relay` (`relayclient`), `vettid/vettid.org` (specs), `vettid/vettid-android`, `vettid/vettid-ios`
@@ -105,6 +105,7 @@ The email is entered on the site, not disclosed by the vault: the member vault n
 3. If a connection exists, the service vault sends a `connection.authenticate.challenge` to the member's vault with `context` = "Sign in to vettid.org member service — match code NN" and an envelope `exp` of five minutes. The member's vault raises an approval on the phone.
 4. Member confirms the code matches the browser and approves; the member's vault signs the challenge with the credential key.
 5. Service vault verifies and webhooks the member service, which issues a short-lived session.
+6. If the approval came with a credential key the service vault does not recognise (`key_changed`: a credential reset, a new phone, or an account recovered by someone else), the member service issues no session until the member also enters a code emailed to the address, and alerts (owner decision 2026-10-27).
 
 Controls: one pending request per member, five-minute TTL, per-email and per-source rate limits; denying on the phone invalidates the challenge; an unregistered email produces the same screen as a registered one; the member vault's ask gate (mute, cooldown, rate) applies. QR remains as a fallback for a member not receiving push. No passwords, no magic links.
 
@@ -370,6 +371,7 @@ Decided and closed: service vault model; no enclave; service vault rebuilt from 
 
 ## Changelog
 
+- **0.6.3** — Changed-key sign-ins (owner decision 2026-10-27): an approval with `key_changed` needs an emailed code before a session, and alerts (§4.2 step 6).
 - **0.6.2** — Roster visibility (owner decision 2026-10-27): members see the member count; admins also see names and join dates (§6).
 - **0.6.1** — Sign-in challenge `exp` five minutes, not two (owner decision 2026-10-27): on the first staging run, two sign-ins expired while the member found the request on the phone and entered the credential password. VAULT-MESSAGING §10.4 allows up to ten (§4.2, 1.4).
 - **0.6.0** — Rebased on the state of the code on 2026-10-26. Service vault rebuilt from scratch as a VMS v2 peer in a new `service-vault` repo; prototype retired. Member-vault work added (service connections, contracts, completions, votes) and VAULT-MESSAGING scope lifted. Email captured on the site, stored as HMAC. Sign-in and interim admin approvals over `connauth`. Services reach phones through the member's vault. Ballot: vote root across credential rotation, `SHA256(proposal_id)` salt, RFC 9474 via circl, timestamp reduction in the ballot box, 409 rule, pool as static file, ≤ 7-day window, operator-metadata boundary. Contracts become Phase 3; total ~16–18 weeks.

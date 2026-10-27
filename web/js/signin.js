@@ -1,7 +1,9 @@
 // Sign in (MEMBER-SERVICE-PLAN §4.2): POST /api/signin/start {email}
 // shows the match code; GET /api/signin/status says pending, approved
-// (the session is set) or ended. The page reads the same whether or not
-// the address is a member's.
+// (the session is set), confirm or ended. The page reads the same whether
+// or not the address is a member's. confirm: approved with a changed
+// credential key, so the member proves the address with an emailed code
+// (POST /api/signin/confirm, then /api/signin/verify) before a session.
 
 import { poll, pollMessages, post } from './api.js';
 import { $ } from './dom.js';
@@ -9,9 +11,12 @@ import * as ui from './ui.js';
 
 ui.init();
 
-const steps = ['step-email', 'step-wait', 'step-end'].map($);
+const steps = ['step-email', 'step-wait', 'step-confirm', 'step-end'].map($);
 const form = $('email-form');
+const confirmEmailForm = $('confirm-email-form');
+const confirmCodeForm = $('confirm-code-form');
 let stop = null;
+let email = ''; // the address this page started with, kept in memory only
 
 function show(id) {
   for (const s of steps) s.hidden = s.id !== id;
@@ -29,6 +34,10 @@ function wait(matchCode, expiresAt) {
       location.replace('/home/');
       return true;
     }
+    if (st?.status === 'confirm') {
+      confirm(st.code_sent);
+      return true;
+    }
     if (!st || st.status === 'ended') {
       show('step-end');
       return true;
@@ -37,9 +46,79 @@ function wait(matchCode, expiresAt) {
   }, { ...pollMessages(ui), until: Number.isNaN(until.getTime()) ? null : until });
 }
 
+/**
+ * The changed-key step: send the code (when the page knows the address),
+ * then take it. It keeps asking for the status, so a confirmation that
+ * runs out shows the end.
+ */
+function confirm(codeSent) {
+  show('step-confirm');
+  if (codeSent) codeStep();
+  else if (email) sendConfirm(confirmCodeForm);
+  else emailStep();
+  stop?.();
+  stop = poll('/api/signin/status', (st) => {
+    if (st?.status === 'confirm') return false;
+    if (st?.status === 'approved') location.replace('/home/');
+    else show('step-end');
+    return true;
+  }, pollMessages(ui));
+}
+
+function emailStep() {
+  confirmEmailForm.hidden = false;
+  confirmCodeForm.hidden = true;
+  $('confirm-email').focus();
+}
+
+function codeStep() {
+  confirmEmailForm.hidden = true;
+  confirmCodeForm.hidden = false;
+  // After a reload a code may be on its way without the page knowing the
+  // address: ask for it beside the code rather than send another.
+  $('confirm-code-email-field').hidden = email !== '';
+  $('confirm-code-email').required = email === '';
+  $('confirm-to').textContent = email || 'your address';
+  $('confirm-code').value = '';
+  $('confirm-code').focus();
+}
+
+async function sendConfirm(target) {
+  const res = await ui.busy(target, () => post('/api/signin/confirm', { email }), { busyLabel: 'Sending…' });
+  if (res) codeStep();
+  else emailStep(); // e.g. wrong_email: let the address be corrected
+}
+
+confirmEmailForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  email = $('confirm-email').value.trim();
+  if (email) await sendConfirm(confirmEmailForm);
+});
+
+$('confirm-resend').addEventListener('click', async () => {
+  if (!email) email = $('confirm-code-email').value.trim();
+  if (email) await sendConfirm($('confirm-resend'));
+  else emailStep();
+});
+
+confirmCodeForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const address = email || $('confirm-code-email').value.trim();
+  const code = $('confirm-code').value.trim();
+  if (!address || !/^[0-9]{6}$/.test(code)) {
+    ui.showError('Enter the 6-digit code from the email.');
+    return;
+  }
+  const res = await ui.busy(confirmCodeForm, () => post('/api/signin/verify', { email: address, code }), { busyLabel: 'Checking…' });
+  if (!res) return;
+  stop?.();
+  if (res.status === 'approved') location.replace('/home/');
+  else show('step-end');
+});
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const email = form.elements.email.value.trim();
+  email = form.elements.email.value.trim();
   if (!email) return;
   const res = await ui.busy(form, () => post('/api/signin/start', { email }), { busyLabel: 'Starting…' });
   if (res) wait(res.match_code, res.expires_at);
@@ -58,6 +137,7 @@ $('again').addEventListener('click', restart);
 // can't be reached, say so and keep asking rather than start over.
 stop = poll('/api/signin/status', (st) => {
   if (st?.status === 'pending') wait(st.match_code, st.expires_at);
+  else if (st?.status === 'confirm') confirm(st.code_sent);
   else if (st?.status === 'approved') location.replace('/home/');
   else show('step-email');
   return true;

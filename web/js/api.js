@@ -13,6 +13,7 @@ export class ApiError extends Error {
 
 const MESSAGES = {
   bad_email: 'That doesn’t look like an email address.',
+  wrong_email: 'That isn’t the address this sign-in was started with.',
   invalid_code: 'That code didn’t work. Check the newest email and try again, or get a new code.',
   rate_limited: 'Too many attempts. Please wait a while and try again.',
   unavailable: 'The VettID service is busy right now. Please try again in a minute.',

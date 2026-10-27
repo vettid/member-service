@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/member-service/api/internal/mail"
 	"github.com/vettid/member-service/api/internal/store"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 	"github.com/vettid/service-vault/sdk/go/webhook"
@@ -27,13 +28,15 @@ type mailbox struct {
 	mu    sync.Mutex
 	codes map[string]string
 	sent  int
+	kind  mail.Kind // of the last
 }
 
-func (m *mailbox) SendCode(_ context.Context, to, code string) error {
+func (m *mailbox) SendCode(_ context.Context, to, code string, kind mail.Kind) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.codes[to] = code
 	m.sent++
+	m.kind = kind
 	return nil
 }
 
