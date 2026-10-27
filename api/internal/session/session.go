@@ -41,13 +41,17 @@ const (
 	CodesPerEmail  = 3                // codes per address per hour
 	CodesPerDay    = 10               // codes per address per day
 	CodesPerSource = 20               // codes per client address (an IPv6 /64) per hour
-	// FailedVerifies caps wrong codes across all flows per hour: past it
-	// every verify is refused (and logged at ERROR, for an alarm), so
-	// guessing across many addresses stays bounded.
-	FailedVerifies = 200
-	RateWindow     = time.Hour
-	dayWindow      = 24 * time.Hour
-	SessionTTL     = 12 * time.Hour
+	// FailedPerSource caps wrong codes from one client address (an IPv6
+	// /64) per hour: past it that source's verifies are refused until the
+	// hour ends. Only the guesser is held up.
+	FailedPerSource = 30
+	// FailedAlarm: when wrong codes across all flows reach it in an hour,
+	// an ERROR is logged for an alarm. Nothing is refused because of it, so
+	// it cannot be used to keep everyone out.
+	FailedAlarm = 200
+	RateWindow  = time.Hour
+	dayWindow   = 24 * time.Hour
+	SessionTTL  = 12 * time.Hour
 	// PollEvery bounds how often a status request asks the service vault
 	// itself, in case a webhook is late.
 	PollEvery = 2 * time.Second
@@ -432,13 +436,14 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_code")
 		return
 	}
-	// Past the global cap of wrong codes, every verify is refused, right
-	// or wrong, until the hour ends.
-	failedKey := "verify:failed:" + s.now().UTC().Truncate(RateWindow).Format(time.RFC3339)
-	if failed, err := s.Store.Count(ctx, kindRate, failedKey); err != nil {
+	// A source past its wrong codes for the hour is refused, right or
+	// wrong, until the hour ends.
+	hour := s.now().UTC().Truncate(RateWindow).Format(time.RFC3339)
+	srcFailed := "verify:failed-source:" + s.mac("source", sourceKey(s.clientIP(r))) + ":" + hour
+	if failed, err := s.Store.Count(ctx, kindRate, srcFailed); err != nil {
 		s.fail(w, "rate", err)
 		return
-	} else if failed >= FailedVerifies {
+	} else if failed >= FailedPerSource {
 		writeError(w, http.StatusBadRequest, "invalid_code")
 		return
 	}
@@ -453,13 +458,17 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 	okEmail := hmac.Equal([]byte(s.mac("email", addr)), []byte(f.EmailKey))
 	okCode := f.Stage == stageCode && hmac.Equal([]byte(s.mac("code", id+"\x00"+req.Code)), []byte(f.CodeMAC))
 	if n > CodeAttempts || !okEmail || !okCode {
-		g, err := s.Store.Incr(ctx, kindRate, failedKey, s.now().Add(RateWindow))
+		if _, err := s.Store.Incr(ctx, kindRate, srcFailed, s.now().Add(RateWindow)); err != nil {
+			s.fail(w, "rate", err)
+			return
+		}
+		g, err := s.Store.Incr(ctx, kindRate, "verify:failed:"+hour, s.now().Add(RateWindow))
 		if err != nil {
 			s.fail(w, "rate", err)
 			return
 		}
-		if g == FailedVerifies {
-			s.log().Error("wrong codes reached the global limit: every verify refused until the hour ends", "limit", FailedVerifies)
+		if g == FailedAlarm {
+			s.log().Error("wrong codes reached the alarm level this hour", "alarm", "verify_failed", "count", FailedAlarm)
 		}
 		writeError(w, http.StatusBadRequest, "invalid_code")
 		return

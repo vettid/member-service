@@ -387,29 +387,45 @@ func TestRemovedBeforeSession(t *testing.T) {
 	}
 }
 
-// Past FailedVerifies wrong codes in the hour, every verify is refused,
-// even with the right code; the next hour it works again.
-func TestGlobalFailedVerifies(t *testing.T) {
+// Wrong codes: past FailedPerSource in the hour, that source's verifies
+// are refused, even with the right code, while another source's work;
+// across all sources, reaching FailedAlarm only logs.
+func TestFailedVerifies(t *testing.T) {
 	f := newFixture(t)
 	f.now = f.now.Truncate(RateWindow)
-	for i := 0; i < FailedVerifies; i++ {
+	guess := func(i int) {
 		f.jar = map[string]string{}
-		f.ip = fmt.Sprintf("198.51.100.%d", i%250)
 		f.do("POST", "/api/connect/start", fmt.Sprintf(`{"email":"g%d@example.org"}`, i))
 		f.do("POST", "/api/connect/verify", fmt.Sprintf(`{"email":"g%d@example.org","code":"x"}`, i))
+	}
+	// From one /64 (its flows are past the codes-per-source limit after
+	// 20, but wrong codes still count).
+	for i := 0; i < FailedPerSource; i++ {
+		f.ip = fmt.Sprintf("2001:db8:9:9::%x", i+1)
+		guess(i)
 	}
 	f.jar = map[string]string{}
 	f.ip = "203.0.113.1"
 	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
 	code := f.mail.code(addr)
+	f.ip = "2001:db8:9:9::ffff"
 	if w := f.do("POST", "/api/connect/verify", `{"email":"`+addr+`","code":"`+code+`"}`); field(t, w, "error") != "invalid_code" {
-		t.Fatalf("a verify past the global cap: %s", w.Body)
+		t.Fatalf("a source past its wrong codes verified: %s", w.Body)
 	}
-	// The next hour (the old code has expired with it), a new flow works.
-	f.now = f.now.Add(RateWindow)
-	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
-	if w := f.do("POST", "/api/connect/verify", `{"email":"`+addr+`","code":"`+f.mail.code(addr)+`"}`); w.Code != http.StatusOK {
-		t.Fatalf("the next hour: %s", w.Body)
+	f.ip = "198.51.100.200"
+	if w := f.do("POST", "/api/connect/verify", `{"email":"`+addr+`","code":"`+code+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("another source was held up: %s", w.Body)
+	}
+	// Across sources, far past FailedAlarm: nobody else is refused.
+	for i := 0; i < FailedAlarm+10; i++ {
+		f.ip = fmt.Sprintf("198.18.%d.%d", i/250, i%250)
+		guess(1000 + i)
+	}
+	f.jar = map[string]string{}
+	f.ip = "203.0.113.2"
+	f.do("POST", "/api/connect/start", `{"email":"late@example.org"}`)
+	if w := f.do("POST", "/api/connect/verify", `{"email":"late@example.org","code":"`+f.mail.code("late@example.org")+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("a right code refused after many wrong ones elsewhere: %s", w.Body)
 	}
 }
 
