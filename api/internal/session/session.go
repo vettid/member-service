@@ -509,28 +509,46 @@ func (s *Server) connectStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no_flow")
 		return
 	}
-	mu := s.lock(tokenKey(id))
+	fk := tokenKey(id)
+	mu := s.lock(fk)
+	f := &flow{}
+	read := func() bool {
+		if ok, err := s.getJSON(ctx, kindFlow, fk, f); err != nil {
+			s.fail(w, "store", err)
+			return false
+		} else if !ok {
+			writeError(w, http.StatusNotFound, "no_flow")
+			return false
+		}
+		return true
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	f := &flow{}
-	if ok, err := s.getJSON(ctx, kindFlow, tokenKey(id), f); err != nil {
-		s.fail(w, "store", err)
-		return
-	} else if !ok {
-		writeError(w, http.StatusNotFound, "no_flow")
+	if !read() {
 		return
 	}
-	now := s.now()
-	if (f.Stage == stageInvite || f.Stage == stageSAS) && now.Sub(f.Polled) >= PollEvery {
+	if now := s.now(); (f.Stage == stageInvite || f.Stage == stageSAS) && now.Sub(f.Polled) >= PollEvery {
 		f.Polled = now
-		if st, err := s.Vault.InviteStatus(ctx, f.InviteID); err != nil {
-			s.log().Warn("invite status", "err", errName(err))
-		} else {
-			applyInviteStatus(f, st)
-		}
-		if err := s.putJSON(ctx, kindFlow, tokenKey(id), f, f.Exp, false); err != nil {
+		if err := s.putJSON(ctx, kindFlow, fk, f, f.Exp, false); err != nil {
 			s.fail(w, "store", err)
 			return
+		}
+		// The call runs without the lock, so a slow service vault holds
+		// up no webhook; the answer applies to the flow as it is then.
+		mu.Unlock()
+		st, err := s.Vault.InviteStatus(ctx, f.InviteID)
+		mu.Lock()
+		if !read() {
+			return
+		}
+		if err != nil {
+			s.log().Warn("invite status", "err", errName(err))
+		} else if f.Stage == stageInvite || f.Stage == stageSAS {
+			applyInviteStatus(f, st)
+			if err := s.putJSON(ctx, kindFlow, fk, f, f.Exp, false); err != nil {
+				s.fail(w, "store", err)
+				return
+			}
 		}
 	}
 	switch f.Stage {
@@ -541,7 +559,7 @@ func (s *Server) connectStatus(w http.ResponseWriter, r *http.Request) {
 	case stageSAS:
 		writeJSON(w, http.StatusOK, map[string]any{"status": "sas", "sas": f.SAS, "expires_at": f.InviteExp.UTC()})
 	case stageConnected:
-		if err := s.startSession(ctx, w, f.ConnID); errors.Is(err, errRemoved) {
+		if err := s.startSession(ctx, w, r, f.ConnID); errors.Is(err, errRemoved) {
 			// Removed since: no session, ever.
 			_ = s.Store.Delete(ctx, kindFlow, tokenKey(id))
 			setCookie(w, FlowCookie, "", 0)
@@ -581,22 +599,45 @@ func applyInviteStatus(f *flow, st *servicevault.InviteStatus) {
 // errRemoved: the connection was removed; it never gets a session again.
 var errRemoved = errors.New("session: connection removed")
 
-// startSession makes a session for the connection and sets its cookie.
-// The roster entry is created if the connection.added webhook has not
+// startSession makes a session for the connection and sets its cookie,
+// ending the session the browser had (perhaps someone else's). The
+// roster entry is created if the connection.added webhook has not
 // arrived yet (it fills in the name), unless the connection was removed
-// in the meantime (errRemoved).
-func (s *Server) startSession(ctx context.Context, w http.ResponseWriter, connID string) error {
+// in the meantime (errRemoved). A removal webhook writes its marker
+// before it deletes the entry, so the check after the write catches one
+// that ran between the first check and the write.
+func (s *Server) startSession(ctx context.Context, w http.ResponseWriter, r *http.Request, connID string) error {
 	if connID == "" {
 		return errors.New("session: no connection")
 	}
-	if _, removed, err := s.Store.Get(ctx, kindRemoved, connID); err != nil {
+	removed := func() (bool, error) {
+		_, ok, err := s.Store.Get(ctx, kindRemoved, connID)
+		return ok, err
+	}
+	if gone, err := removed(); err != nil {
 		return err
-	} else if removed {
+	} else if gone {
 		return errRemoved
 	}
 	now := s.now()
-	if err := s.putJSON(ctx, kindMember, connID, &Member{Joined: now.UTC()}, time.Time{}, true); err != nil && !errors.Is(err, store.ErrExists) {
+	created := true
+	if err := s.putJSON(ctx, kindMember, connID, &Member{Joined: now.UTC()}, time.Time{}, true); errors.Is(err, store.ErrExists) {
+		created = false
+	} else if err != nil {
 		return err
+	}
+	if gone, err := removed(); err != nil {
+		return err
+	} else if gone {
+		if created {
+			_ = s.Store.Delete(ctx, kindMember, connID)
+		}
+		return errRemoved
+	}
+	if old := cookie(r, SessionCookie); old != "" {
+		if err := s.Store.Delete(ctx, kindSession, tokenKey(old)); err != nil {
+			return err
+		}
 	}
 	t, err := token()
 	if err != nil {

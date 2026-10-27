@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/vettid/member-service/api/internal/store"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
 
@@ -101,28 +103,30 @@ func TestSignInPolls(t *testing.T) {
 	}
 }
 
-// The first outcome stands: an approval after a denial is ignored. A
-// sign-in for a removed connection makes no session.
+// The first outcome stands: an approval after a denial is ignored.
+// Denied and expired read alike ("ended"), so the answer does not say
+// whether an address is a member's. A sign-in for a removed connection
+// makes no session.
 func TestSignInDeniedAndRemoved(t *testing.T) {
 	f := newFixture(t)
 	f.connected()
 	f.signInStart()
 	f.hook("01EVDENIED", "signin.denied", "c1", map[string]any{"signin_id": "si1", "reason": "denied"})
 	f.hook("01EVLATE", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
-	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "denied" || f.jar[SessionCookie] != "" {
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
 		t.Fatalf("denied: %s", w.Body)
 	}
 
 	f.signInStart()
 	f.hook("01EVEXPIRED", "signin.expired", "c1", map[string]any{"signin_id": "si2"})
-	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "expired" {
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" {
 		t.Fatalf("expired: %s", w.Body)
 	}
 
 	f.signInStart()
 	f.hook("01EVREMOVED", "connection.removed", "c1", map[string]any{"direction": "in"})
 	f.hook("01EVAPPROVED", "signin.approved", "c1", map[string]any{"signin_id": "si3"})
-	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "expired" || f.jar[SessionCookie] != "" {
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
 		t.Fatalf("removed: %s", w.Body)
 	}
 }
@@ -185,5 +189,91 @@ func TestMembers(t *testing.T) {
 	}
 	if b := w.Body.String(); !strings.Contains(b, `"count":2`) || strings.Index(b, "Bob") > strings.Index(b, "Ada") {
 		t.Fatalf("members: %s", b)
+	}
+}
+
+// Events the flow cannot use are acknowledged and change nothing: an
+// unknown sign-in, and an approval without a connection id. A sign-in
+// the service vault no longer knows ends.
+func TestSignInOddEvents(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	if w := f.hook("01EVUNKNOWN", "signin.approved", "c1", map[string]any{"signin_id": "nope"}); w.Code != http.StatusNoContent {
+		t.Fatalf("unknown sign-in: %d", w.Code)
+	}
+	f.signInStart()
+	f.hook("01EVNOCONN", "signin.approved", "", map[string]any{"signin_id": "si1"})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "pending" || f.jar[SessionCookie] != "" {
+		t.Fatalf("no connection id: %s", w.Body)
+	}
+	delete(f.vault.signins, "si1")
+	f.now = f.now.Add(PollEvery)
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" {
+		t.Fatalf("not found: %s", w.Body)
+	}
+}
+
+// Signing in ends the browser's earlier session, which may be another
+// member's on a shared computer.
+func TestSignInEndsTheOldSession(t *testing.T) {
+	f := newFixture(t)
+	f.verify()
+	f.hook("01EVADDED", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada"})
+	f.do("GET", "/api/connect/status", "")
+	old := f.jar[SessionCookie]
+	f.signInStart()
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	f.do("GET", "/api/signin/status", "")
+	if f.jar[SessionCookie] == "" || f.jar[SessionCookie] == old {
+		t.Fatal("no new session")
+	}
+	if _, ok, _ := f.st.Get(context.Background(), kindSession, tokenKey(old)); ok {
+		t.Fatal("the old session lives on")
+	}
+}
+
+// removing is a store that removes c1, as the webhook would, right after
+// a session writes its roster entry.
+type removing struct {
+	*store.Mem
+	s *Server
+}
+
+func (r *removing) Put(ctx context.Context, kind, id string, data []byte, exp time.Time, ifAbsent bool) error {
+	err := r.Mem.Put(ctx, kind, id, data, exp, ifAbsent)
+	if kind == kindMember && ifAbsent && err == nil {
+		_ = r.s.webhook(ctx, &servicevault.ConnectionRemoved{Header: servicevault.Header{ID: "x", Type: "connection.removed", ConnectionID: id}})
+	}
+	return err
+}
+
+// A removal that lands while a session starts leaves no session and no
+// roster entry; a removed member drops off the roster and out of it.
+func TestRemovalDuringSignIn(t *testing.T) {
+	f := newFixture(t)
+	f.signInStart()
+	f.s.Store = &removing{Mem: f.st, s: f.s}
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
+		t.Fatalf("status: %s", w.Body)
+	}
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "c1"); ok {
+		t.Fatal("removed connection on the roster")
+	}
+
+	f = newFixture(t)
+	f.connected()
+	f.signInStart()
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	f.do("GET", "/api/signin/status", "")
+	if w := f.do("GET", "/api/members", ""); w.Code != http.StatusOK {
+		t.Fatalf("members: %d", w.Code)
+	}
+	f.hook("01EVREMOVED", "connection.removed", "c1", map[string]any{"direction": "in"})
+	if w := f.do("GET", "/api/members", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("members after removal: %d", w.Code)
+	}
+	if items, _ := f.st.List(context.Background(), kindMember); len(items) != 0 {
+		t.Fatalf("roster %v", items)
 	}
 }

@@ -43,6 +43,8 @@ const (
 	signInApproved = "approved"
 	signInDenied   = "denied"
 	signInExpired  = "expired"
+	// signInEnded is what the browser is told for denied and expired.
+	signInEnded = "ended"
 )
 
 type signIn struct {
@@ -106,8 +108,9 @@ func (s *Server) signInStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // signInStatus reports the sign-in: pending (show the match code),
-// approved (the session is set), denied or expired. It asks the service
-// vault itself at most every PollEvery, in case a webhook is late.
+// approved (the session is set) or ended (denied or expired, alike). It
+// asks the service vault itself at most every PollEvery, in case a
+// webhook is late.
 func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := cookie(r, SignInCookie)
@@ -117,28 +120,49 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	fk := tokenKey(id)
 	mu := s.lock(fk)
+	f := &signIn{}
+	read := func() bool {
+		if ok, err := s.getJSON(ctx, kindSignIn, fk, f); err != nil {
+			s.fail(w, "store", err)
+			return false
+		} else if !ok {
+			setCookie(w, SignInCookie, "", 0)
+			writeError(w, http.StatusNotFound, "no_flow")
+			return false
+		}
+		return true
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	f := &signIn{}
-	if ok, err := s.getJSON(ctx, kindSignIn, fk, f); err != nil {
-		s.fail(w, "store", err)
-		return
-	} else if !ok {
-		setCookie(w, SignInCookie, "", 0)
-		writeError(w, http.StatusNotFound, "no_flow")
+	if !read() {
 		return
 	}
-	now := s.now()
-	if f.Stage == signInPending && now.Sub(f.Polled) >= PollEvery {
+	if now := s.now(); f.Stage == signInPending && now.Sub(f.Polled) >= PollEvery {
 		f.Polled = now
-		if st, err := s.Vault.SignInStatus(ctx, f.ID); err != nil {
-			s.log().Warn("sign-in status", "err", errName(err))
-		} else {
-			applySignInStatus(f, st)
-		}
 		if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
 			s.fail(w, "store", err)
 			return
+		}
+		// Without the lock, so a slow service vault holds up no webhook;
+		// the answer applies only if the sign-in is still pending.
+		mu.Unlock()
+		st, err := s.Vault.SignInStatus(ctx, f.ID)
+		mu.Lock()
+		if !read() {
+			return
+		}
+		switch {
+		case servicevault.IsNotFound(err):
+			st, err = &servicevault.SignInStatus{ID: f.ID, Status: servicevault.SignInStatusExpired}, nil
+		case err != nil:
+			s.log().Warn("sign-in status", "err", errName(err))
+		}
+		if err == nil && f.Stage == signInPending {
+			applySignInStatus(f, st)
+			if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
+				s.fail(w, "store", err)
+				return
+			}
 		}
 	}
 	end := func(status string) {
@@ -157,8 +181,8 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 			// logged for review.
 			s.log().Warn("sign-in with a changed key", "connection_id", f.ConnID)
 		}
-		if err := s.startSession(ctx, w, f.ConnID); errors.Is(err, errRemoved) {
-			end(signInExpired)
+		if err := s.startSession(ctx, w, r, f.ConnID); errors.Is(err, errRemoved) {
+			end(signInEnded)
 			return
 		} else if err != nil {
 			s.fail(w, "session", err)
@@ -166,7 +190,11 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		end(signInApproved)
 	default:
-		end(f.Stage)
+		// Denied and expired look alike to the browser: an unknown address
+		// always expires, and a member's vault can turn a challenge down
+		// without the member (its ask gate), so "denied" would say the
+		// address is a member's (§4.2: the same screen either way).
+		end(signInEnded)
 	}
 }
 
