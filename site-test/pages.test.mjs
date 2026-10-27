@@ -190,6 +190,53 @@ test('sign-in: ended reads the same however it ended; a reload resumes', async (
   assert.match(page.get('errors').textContent, /Too many attempts/);
 });
 
+test('sign-in: a changed key confirms with an emailed code', async () => {
+  let page = load(web + 'signin/index.html');
+  const c = clock();
+  const calls = api({
+    'GET /api/signin/status': [[404, { error: 'no_flow' }], [200, { status: 'confirm', code_sent: false, expires_at: '2026-10-27T12:10:00Z' }]],
+    'POST /api/signin/start': [[202, { match_code: '42', expires_at: '2026-10-27T12:06:00Z' }]],
+    'POST /api/signin/confirm': [[202, { expires_at: '2026-10-27T12:10:00Z' }]],
+    'POST /api/signin/verify': [[400, { error: 'invalid_code' }], [200, { status: 'approved' }]],
+  });
+  await run('signin.js');
+  page.get('email').value = 'ada@example.org';
+  await page.get('email-form').dispatch('submit');
+  await c.tick();
+  assert.ok(visible(page, 'step-confirm'));
+  assert.deepEqual(calls.find((x) => x.key === 'POST /api/signin/confirm').body, { email: 'ada@example.org' }, 'the code is sent at once');
+  assert.ok(visible(page, 'confirm-code-form'));
+  assert.equal(page.get('confirm-to').textContent, 'ada@example.org');
+  assert.equal(page.replaced, null, 'no session yet');
+  page.get('confirm-code').value = '123456';
+  await page.get('confirm-code-form').dispatch('submit');
+  assert.match(page.get('errors').textContent, /didn’t work/);
+  await page.get('confirm-code-form').dispatch('submit');
+  assert.deepEqual(calls.at(-1).body, { email: 'ada@example.org', code: '123456' });
+  assert.equal(page.replaced, '/home/');
+  assert.equal(c.pending(), 0);
+
+  // After a reload the page asks for the address first.
+  page = load(web + 'signin/index.html');
+  clock();
+  const calls2 = api({
+    'GET /api/signin/status': [[200, { status: 'confirm', code_sent: false, expires_at: '2026-10-27T12:10:00Z' }]],
+    'POST /api/signin/confirm': [[400, { error: 'wrong_email' }], [202, { expires_at: '2026-10-27T12:10:00Z' }]],
+  });
+  await run('signin.js');
+  assert.ok(visible(page, 'step-confirm'));
+  assert.ok(visible(page, 'confirm-email-form'));
+  assert.ok(page.get('confirm-code-form').hidden);
+  page.get('confirm-email').value = 'bob@example.org';
+  await page.get('confirm-email-form').dispatch('submit');
+  assert.match(page.get('errors').textContent, /isn’t the address/);
+  assert.ok(visible(page, 'confirm-email-form'));
+  page.get('confirm-email').value = 'ada@example.org';
+  await page.get('confirm-email-form').dispatch('submit');
+  assert.ok(visible(page, 'confirm-code-form'));
+  assert.equal(calls2.at(-1).body.email, 'ada@example.org');
+});
+
 test('home: a member sees the count, an admin the names', async () => {
   let page = load(web + 'home/index.html');
   clock();

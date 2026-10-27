@@ -94,7 +94,8 @@ func TestSignIn(t *testing.T) {
 }
 
 // Without a webhook the status call asks the service vault, at most
-// every PollEvery; a changed key still signs in.
+// every PollEvery; an approval with a changed key waits for the emailed
+// code.
 func TestSignInPolls(t *testing.T) {
 	f := newFixture(t)
 	f.connected()
@@ -108,8 +109,8 @@ func TestSignInPolls(t *testing.T) {
 	changed := true
 	f.vault.signins["si1"] = &servicevault.SignInStatus{ID: "si1", Status: servicevault.SignInStatusApproved, ConnectionID: "c1", KeyChanged: &changed}
 	f.now = f.now.Add(PollEvery)
-	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "approved" || f.jar[SessionCookie] == "" {
-		t.Fatalf("approved: %s", w.Body)
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "confirm" || f.jar[SessionCookie] != "" {
+		t.Fatalf("changed key: %s", w.Body)
 	}
 }
 
@@ -315,5 +316,71 @@ func TestRemovalDuringSignIn(t *testing.T) {
 	}
 	if items, _ := f.st.List(context.Background(), kindMember); len(items) != 0 {
 		t.Fatalf("roster %v", items)
+	}
+}
+
+// A changed key (a reset, a new phone, or someone who recovered the
+// account): no session until the member proves the address with an
+// emailed code. Only the browser that started can confirm, only with the
+// address it started with, and the code's limits are connect's.
+func TestSignInKeyChanged(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	sent := f.mail.sent
+	f.signInStart()
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1", "key_changed": true})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "confirm" || f.jar[SessionCookie] != "" {
+		t.Fatalf("status: %s", w.Body)
+	}
+	f.hook("01EVLATE", "signin.denied", "c1", map[string]any{"signin_id": "si1", "reason": "denied"})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "confirm" {
+		t.Fatalf("after a late webhook: %s", w.Body)
+	}
+	mine := f.jar
+	f.jar = map[string]string{}
+	if w := f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("another browser: %d", w.Code)
+	}
+	f.jar = mine
+	if w := f.do("POST", "/api/signin/confirm", `{"email":"other@example.org"}`); field(t, w, "error") != "wrong_email" || f.mail.sent != sent {
+		t.Fatalf("another address: %s", w.Body)
+	}
+	if w := f.do("POST", "/api/signin/confirm", `{"email":" Member@Example.org "}`); w.Code != http.StatusAccepted || f.mail.sent != sent+1 {
+		t.Fatalf("confirm: %d %s", w.Code, w.Body)
+	}
+	code := f.mail.code(addr)
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"000000"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("wrong code: %s", w.Body)
+	}
+	if w := f.do("POST", "/api/signin/verify", `{"email":"other@example.org","code":"`+code+`"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("wrong address: %s", w.Body)
+	}
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"`+code+`"}`); field(t, w, "status") != "approved" || f.jar[SessionCookie] == "" || f.jar[SignInCookie] != "" {
+		t.Fatalf("verify: %s", w.Body)
+	}
+	if w := f.do("GET", "/api/me", ""); w.Code != http.StatusOK {
+		t.Fatalf("me: %d", w.Code)
+	}
+}
+
+// The confirm code has connect's limits: CodeAttempts tries, then even
+// the right code is refused; a sign-in that never confirms ends.
+func TestSignInKeyChangedLimits(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	f.signInStart()
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1", "key_changed": true})
+	f.do("GET", "/api/signin/status", "")
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	code := f.mail.code(addr)
+	for range CodeAttempts {
+		f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"999999"}`)
+	}
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"`+code+`"}`); field(t, w, "error") != "invalid_code" || f.jar[SessionCookie] != "" {
+		t.Fatalf("past the attempts: %s", w.Body)
+	}
+	f.now = f.now.Add(CodeTTL)
+	if w := f.do("GET", "/api/signin/status", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("after its time: %d", w.Code)
 	}
 }
