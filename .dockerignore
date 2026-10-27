@@ -9,3 +9,6 @@ local-mail
 site-test
 web
 *.md
+.env.*
+*.pem
+*.key

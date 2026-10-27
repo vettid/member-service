@@ -10,6 +10,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -25,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"sync"
 	"time"
 
@@ -41,6 +43,9 @@ const (
 	CodesPerEmail  = 3                // codes per address per hour
 	CodesPerDay    = 10               // codes per address per day
 	CodesPerSource = 20               // codes per client address (an IPv6 /64) per hour
+	// StartsPerSource refuses (429) connect starts from one client address
+	// (an IPv6 /64) per hour past it, before anything is written.
+	StartsPerSource = 60
 	// FailedPerSource caps wrong codes from one client address (an IPv6
 	// /64) per hour: past it that source's verifies are refused until the
 	// hour ends. Only the guesser is held up.
@@ -349,13 +354,22 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	now := s.now()
+	// A source past StartsPerSource is refused before anything is
+	// written for it (its own limit, so it says nothing about addresses).
+	if over, err := s.limited(ctx, "start:source:"+s.mac("source", sourceKey(s.clientIP(r))), StartsPerSource, RateWindow); err != nil {
+		s.fail(w, "rate", err)
+		return
+	} else if over {
+		writeError(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
 	f := &flow{EmailKey: s.mac("email", addr), Stage: stageCode, Exp: now.Add(CodeTTL)}
 	id, err := token()
 	if err != nil {
 		s.fail(w, "token", err)
 		return
 	}
-	code, err := s.newCode(ctx, r, f.EmailKey, tokenKey(id)[:16])
+	code, err := s.newCode(ctx, r, "code", f.EmailKey, tokenKey(id)[:16])
 	if err != nil {
 		s.fail(w, "code", err)
 		return
@@ -379,7 +393,11 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 // source is counted first: a source over its limit does not use up the
 // address's codes, so it cannot lock someone out of theirs. flowLog
 // names the flow in the log.
-func (s *Server) newCode(ctx context.Context, r *http.Request, emailKey, flowLog string) (string, error) {
+//
+// purpose names the address's own limits ("code" for connect, "confirm"
+// for the changed-key confirmation), so that connect starts with someone
+// else's address cannot use up a member's confirmation codes.
+func (s *Server) newCode(ctx context.Context, r *http.Request, purpose, emailKey, flowLog string) (string, error) {
 	overSource, err := s.limited(ctx, "code:source:"+s.mac("source", sourceKey(s.clientIP(r))), CodesPerSource, RateWindow)
 	if err != nil {
 		return "", err
@@ -390,7 +408,7 @@ func (s *Server) newCode(ctx context.Context, r *http.Request, emailKey, flowLog
 			key string
 			n   int
 			win time.Duration
-		}{{"code:email:", CodesPerEmail, RateWindow}, {"code:email-day:", CodesPerDay, dayWindow}} {
+		}{{purpose + ":email:", CodesPerEmail, RateWindow}, {purpose + ":email-day:", CodesPerDay, dayWindow}} {
 			over, err := s.limited(ctx, l.key+emailKey, l.n, l.win)
 			if err != nil {
 				return "", err
@@ -511,6 +529,12 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 	inv, err := s.Vault.CreateInvite(ctx, addr, servicevault.EmailVerified)
 	if err != nil {
 		s.log().Warn("create invite", "err", errName(err))
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	if u, err := url.Parse(inv.URL); err != nil || u.Scheme != "https" || u.Host == "" {
+		// The button and the QR code carry it: only an https link.
+		s.log().Error("invite url refused", "invite_id", inv.ID)
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
@@ -698,6 +722,15 @@ func (s *Server) Member(ctx context.Context, r *http.Request) (connID string, m 
 	if err != nil {
 		return "", nil, false, err
 	}
+	if found {
+		// The removal marker counts too: a roster entry put back by a
+		// race must not keep a removed member's sessions alive.
+		_, removed, err := s.Store.Get(ctx, kindRemoved, sr.ConnID)
+		if err != nil {
+			return "", nil, false, err
+		}
+		found = !removed
+	}
 	if !found {
 		_ = s.Store.Delete(ctx, kindSession, tokenKey(t))
 		return "", nil, false, nil
@@ -733,8 +766,29 @@ func (s *Server) signOut(w http.ResponseWriter, r *http.Request) {
 // --- webhooks ---
 
 // webhook acts on a verified event. An error makes the Receiver answer
-// 500, so the service vault delivers the event again.
+// 500, so the service vault delivers the event again. Once handled, the
+// event's replay record says so (replay.Add): only then is a delivery of
+// it a replay.
 func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
+	if err := s.handle(ctx, e); err != nil {
+		return err
+	}
+	h := e.EventHeader()
+	return s.Store.Put(ctx, kindHook, h.ID, hookDone, h.CreatedAt.Add(hookKeep), false)
+}
+
+// hookKeep is how long a handled event's id is kept against replays:
+// longer than the webhook signature's tolerance and the Receiver's own
+// replay window.
+const hookKeep = 24 * time.Hour
+
+// Replay record states: an event being handled, and one handled.
+var (
+	hookPending = []byte("p")
+	hookDone    = []byte("d")
+)
+
+func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 	h := e.EventHeader()
 	s.log().Info("webhook", "event_id", h.ID, "type", h.Type, "connection_id", h.ConnectionID)
 	switch ev := e.(type) {
@@ -759,6 +813,13 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 		}
 		if err := s.putJSON(ctx, kindMember, h.ConnectionID, m, time.Time{}, false); err != nil {
 			return err
+		}
+		// A removal handled meanwhile writes its marker before it deletes
+		// the entry: checking again after the write catches it.
+		if _, removed, err := s.Store.Get(ctx, kindRemoved, h.ConnectionID); err != nil {
+			return err
+		} else if removed {
+			return s.Store.Delete(ctx, kindMember, h.ConnectionID)
 		}
 		return s.updateFlow(ctx, ev.InviteID, func(f *flow) { f.Stage, f.ConnID = stageConnected, h.ConnectionID })
 	case *servicevault.ConnectionDeclined:
@@ -790,7 +851,7 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 			s.keyChanged(f)
 		})
 	case *servicevault.AdminSetChanged:
-		s.setAdmins(ev.Admins, true, 0)
+		s.setAdmins(ev.Admins, true, 0, h.CreatedAt)
 		return nil
 	case *servicevault.SignInDenied:
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInDenied })
@@ -822,12 +883,23 @@ func (s *Server) updateFlow(ctx context.Context, inviteID string, change func(*f
 // restart is still recognized.
 type replay struct{ s store.Store }
 
+// Add reports whether an event is to be handled. Only a handled one
+// (marked done by webhook) is a replay. A record left pending (a handler
+// that failed and could not be removed, or our own write retried after
+// its answer was lost) is handled again: every handler can run twice.
 func (r *replay) Add(ctx context.Context, id string, _, until time.Time) (bool, error) {
-	err := r.s.Put(ctx, kindHook, id, nil, until, true)
-	if errors.Is(err, store.ErrExists) {
-		return false, nil
+	err := r.s.Put(ctx, kindHook, id, hookPending, until, true)
+	if err == nil {
+		return true, nil
 	}
-	return err == nil, err
+	if !errors.Is(err, store.ErrExists) {
+		return false, err
+	}
+	b, ok, err := r.s.Get(ctx, kindHook, id)
+	if err != nil {
+		return false, err
+	}
+	return !ok || !bytes.Equal(b, hookDone), nil
 }
 
 func (r *replay) Remove(ctx context.Context, id string) error { return r.s.Delete(ctx, kindHook, id) }

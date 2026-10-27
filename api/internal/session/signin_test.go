@@ -127,12 +127,19 @@ func TestSignInDeniedAndRemoved(t *testing.T) {
 	f.signInStart()
 	f.hook("01EVDENIED", "signin.denied", "c1", map[string]any{"signin_id": "si1", "reason": "denied"})
 	f.hook("01EVLATE", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	// A denial reads pending until SignInWait, as an unknown address
+	// does: how soon it ends tells nothing.
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "pending" || field(t, w, "match_code") != "42" {
+		t.Fatalf("denied, early: %s", w.Body)
+	}
+	f.now = f.now.Add(SignInWait)
 	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
 		t.Fatalf("denied: %s", w.Body)
 	}
 
 	f.signInStart()
 	f.hook("01EVEXPIRED", "signin.expired", "c1", map[string]any{"signin_id": "si2"})
+	f.now = f.now.Add(SignInWait)
 	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" {
 		t.Fatalf("expired: %s", w.Body)
 	}
@@ -143,6 +150,7 @@ func TestSignInDeniedAndRemoved(t *testing.T) {
 	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
 		t.Fatalf("removed: %s", w.Body)
 	}
+
 }
 
 // A browser's sign-in is its own: another browser cannot read or finish
@@ -251,7 +259,7 @@ func TestSignInOddEvents(t *testing.T) {
 		t.Fatalf("no connection id: %s", w.Body)
 	}
 	delete(f.vault.signins, "si1")
-	f.now = f.now.Add(PollEvery)
+	f.now = f.now.Add(SignInWait)
 	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" {
 		t.Fatalf("not found: %s", w.Body)
 	}
@@ -445,8 +453,11 @@ func TestSignInConfirmRules(t *testing.T) {
 			t.Fatalf("the replaced code: %s", w.Body)
 		}
 	}
-	// Codes per address per hour: connect used one, these two; the
-	// next is held back but answered alike.
+	// Confirm codes per address per hour (their own limit, apart from
+	// connect's): these two and one more; the next is held back but
+	// answered alike.
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	second = f.mail.code(addr)
 	sent := f.mail.sent
 	if w := f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`); w.Code != http.StatusAccepted || f.mail.sent != sent {
 		t.Fatalf("held back: %d, sent %d", w.Code, f.mail.sent-sent)

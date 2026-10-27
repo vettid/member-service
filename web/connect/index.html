@@ -42,7 +42,7 @@
     <section class="card" id="step-email" aria-labelledby="email-title" hidden>
       <h2 id="email-title">1. Your email address</h2>
       <p>We'll email you a 6-digit code. Your address lets you sign in later; we keep only a keyed hash of it, never the address itself.</p>
-      <form id="email-form" class="form-grid">
+      <form id="email-form" class="form-grid" method="post">
         <div class="field">
           <label for="email">Email address</label>
           <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" spellcheck="false">
@@ -55,7 +55,7 @@
     <section class="card" id="step-code" aria-labelledby="code-title" tabindex="-1" hidden>
       <h2 id="code-title">2. Enter the code</h2>
       <p>We sent a 6-digit code to <strong id="code-to"></strong>, if the address can receive it. It works for 10 minutes. Check your spam or junk folder too.</p>
-      <form id="code-form" class="form-grid">
+      <form id="code-form" class="form-grid" method="post">
         <div class="field" id="code-email-field" hidden>
           <label for="code-email">Email address</label>
           <input id="code-email" name="email" type="email" autocomplete="email" maxlength="254" spellcheck="false">
