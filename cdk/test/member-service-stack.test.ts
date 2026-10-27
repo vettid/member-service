@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { ALARMS, API_PORT, CLIENT_IP_HEADER, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
@@ -88,7 +90,6 @@ describe('data', () => {
     t.hasResource('AWS::DynamoDB::Table', {
       DeletionPolicy: 'Retain',
       Properties: Match.objectLike({
-        TableName: 'vettid-member-service-test',
         KeySchema: [
           { AttributeName: 'pk', KeyType: 'HASH' },
           { AttributeName: 'sk', KeyType: 'RANGE' },
@@ -158,16 +159,51 @@ describe('task', () => {
     }
   });
 
-  test('the generated secrets are retained, except the origin header (rotatable with a redeploy)', () => {
-    const secrets = t.findResources('AWS::SecretsManager::Secret');
-    const byName = Object.fromEntries(Object.values<any>(secrets).map((s) => [s.Properties.Name, s]));
-    expect(Object.keys(byName).sort()).toEqual([
-      'vettid-member-service-test/origin-verify',
-      'vettid-member-service-test/pepper',
-      'vettid-member-service-test/service-vault-api-key',
-    ]);
-    expect(byName['vettid-member-service-test/pepper'].DeletionPolicy).toBe('Retain');
-    expect(byName['vettid-member-service-test/service-vault-api-key'].DeletionPolicy).toBe('Retain');
+  test('the generated secrets: the API key and pepper retained; nothing retained has a fixed name', () => {
+    const secrets = Object.entries<any>(t.findResources('AWS::SecretsManager::Secret'));
+    expect(secrets.map(([id]) => id.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual(['OriginVerify', 'Pepper', 'ServiceVaultApiKey']);
+    for (const [id, s] of secrets) {
+      expect(s.Properties.Name).toBeUndefined();
+      if (!id.startsWith('OriginVerify')) expect(s.DeletionPolicy).toBe('Retain');
+    }
+    for (const type of ['AWS::DynamoDB::Table', 'AWS::Logs::LogGroup']) {
+      for (const r of Object.values<any>(t.findResources(type))) {
+        expect(r.Properties.TableName ?? r.Properties.LogGroupName).toBeUndefined();
+      }
+    }
+  });
+
+  test('the execution role reads exactly the five task secrets', () => {
+    const td = Object.values<any>(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+    const roleId = td.ExecutionRoleArn['Fn::GetAtt'][0];
+    const st = Object.values<any>(t.findResources('AWS::IAM::Policy'))
+      .filter((p) => p.Properties.Roles.some((r: any) => r.Ref === roleId))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement);
+    const sm = st.filter((s) => [s.Action].flat().includes('secretsmanager:GetSecretValue'));
+    const smResources = sm.flatMap((s) => [s.Resource].flat());
+    expect(smResources).toHaveLength(4);
+    expect(smResources).toContainEqual(imported('WebhookSecretArn'));
+    const ssmSt = st.filter((s) => [s.Action].flat().some((a: string) => a.startsWith('ssm:')));
+    expect(ssmSt).toHaveLength(1);
+    expect(json(ssmSt[0].Resource)).toContain('ServiceVault-test-TlsPinParameterName');
+    for (const s of st) expect([s.Resource].flat()).not.toContain('*');
+  });
+
+  test('every variable the member API reads is set, as a value or a secret, and none it does not', () => {
+    const main = readFileSync(join(__dirname, '..', '..', 'api', 'cmd', 'member-api', 'main.go'), 'utf8');
+    const read = new Set([...main.matchAll(/getenv\("([A-Z_]+)"\)/g)].map((m) => m[1]));
+    const c = container();
+    const set = [...c.Environment.map((e: any) => e.Name), ...c.Secrets.map((s: any) => s.Name)].filter((n) => n !== 'AWS_REGION');
+    for (const name of set) expect(read).toContain(name);
+    for (const name of ['MEMBER_API_ADDR', 'SERVICE_VAULT_URL', 'SERVICE_VAULT_API_KEY', 'SERVICE_VAULT_PIN', 'WEBHOOK_SECRET', 'MEMBER_API_PEPPER', 'DYNAMODB_TABLE', 'MAIL_FROM', 'CLIENT_IP_HEADER', 'ORIGIN_VERIFY_SECRET']) {
+      expect(set).toContain(name);
+    }
+  });
+
+  test('an ECR image is pulled by digest from its repository', () => {
+    const ecrImage = `123456789012.dkr.ecr.us-east-1.amazonaws.com/member-api@${DIGEST}`;
+    const td = Object.values<any>(synth({ image: ecrImage }).findResources('AWS::ECS::TaskDefinition'))[0].Properties;
+    expect(json(td.ContainerDefinitions[0].Image)).toContain(`member-api@${DIGEST}`);
   });
 });
 

@@ -154,26 +154,60 @@ Context (`-c key=value`):
 
 First deployment:
 
-1. The image: after the first publish, check that the GHCR package
+1. The service vault: `ServiceVault-<env>` is deployed and its task has
+   started at least once. Only then does its TLS pin parameter hold a pin:
+   `aws ssm get-parameter --name /vettid/service-vault/<env>/tls-pin`
+   must answer `sha256/…`, not `unset`. With `unset`, the member API exits
+   at start and the stack's create rolls back.
+2. The availability zones: HTTP API VPC links aren't supported in a few
+   AZ IDs (see the API Gateway documentation for the current list, e.g.
+   `use1-az3`). Check the AZ IDs of the service vault's two subnets
+   (`aws ec2 describe-subnets`, `AvailabilityZoneId`) before deploying.
+3. The image: after the first publish, check that the GHCR package
    `vettid/member-service` is public. Fargate pulls it without
    credentials, as it does the service vault's.
-2. SES: `mailFrom`'s domain must be a verified identity in the account.
+4. SES: `mailFrom`'s domain must be a verified identity in the account.
    While the account is in the SES sandbox, codes reach only verified
    recipients.
-3. `cd cdk && npm ci && npx cdk deploy -c envName=staging -c image=… -c hostName=member.staging.vettid.org -c hostedZoneId=… -c zoneName=staging.vettid.org -c mailFrom=no-reply@staging.vettid.org`
-4. Register the API key with the service vault:
+5. `cd cdk && npm ci && npx cdk deploy -c envName=staging -c image=… -c hostName=member.staging.vettid.org -c hostedZoneId=… -c zoneName=staging.vettid.org -c mailFrom=no-reply@staging.vettid.org`
+6. Register the API key with the service vault:
    - Add the SHA-256 (hex) of the `ServiceVaultApiKeySecretArn` output's
      value to the service vault's `…/api-key-hashes` secret. The value is
      comma-separated, so keep the keys already there.
-   - Restart the service vault.
+   - Restart the service vault, which reads the hashes at start. Until
+     then, the member API's calls are refused (`unauthorized`).
    - Don't also deploy the service vault with `apiClientSecurityGroupId`
      set to this task's group: this stack already adds that rule.
-5. Point the service vault's webhooks here: redeploy it with
+7. Point the service vault's webhooks here: redeploy it with
    `-c webhookUrl=` the `WebhookUrl` output
    (`https://<hostName>/api/webhooks/service-vault`).
-6. Restart the member API (`aws ecs update-service --force-new-deployment`),
-   so the task reads the registered key's secret and the current pin.
-   Then check `https://<hostName>/api/health` and the site.
+8. Check `https://<hostName>/api/health` and the site, and connect a
+   test member.
+
+If a first create rolls back, it keeps what is retained:
+- the table (deletion-protected);
+- the API key and pepper secrets;
+- the log groups.
+
+They have CloudFormation-made names, so a retry doesn't collide with
+them. Delete the leftovers once the stack is up (turn off the table's
+deletion protection first).
+
+Later:
+- **The pin:** the member API reads the TLS pin at start. If the service
+  vault's key ever changes, restart the member API with
+  `aws ecs update-service --force-new-deployment` (the `ClusterName` and
+  `ServiceName` outputs).
+- **The origin-verify secret:** CloudFormation reads its value into the
+  distribution only when the distribution changes. To rotate it, change
+  the secret, then deploy a change that touches the distribution (as
+  vettid.org does), and restart the member API.
+- **Throttling:** the HTTP API's stage limit (50 requests/s, burst 100)
+  is shared by every caller. Its execute-api URL is public, so requests
+  sent there directly, which the member API refuses without the origin
+  secret, count against it too. That's accepted for staging. If it is
+  ever abused, put a WAF rate rule on the execute-api stage and raise the
+  limit.
 
 ## Build and test
 

@@ -92,6 +92,11 @@ func TestHealthcheck(t *testing.T) {
 	if err := healthcheck(strings.TrimPrefix(srv.URL, "http://")); err != nil {
 		t.Fatal(err)
 	}
+	// The task's own address has no host (":8081"): the probe asks
+	// 127.0.0.1.
+	if err := healthcheck(":" + srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]); err != nil {
+		t.Fatalf("empty host: %v", err)
+	}
 	if err := healthcheck("127.0.0.1:1"); err == nil {
 		t.Fatal("nothing listening")
 	}

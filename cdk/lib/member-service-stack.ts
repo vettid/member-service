@@ -174,9 +174,12 @@ export class MemberServiceStack extends cdk.Stack {
       description: 'private API from the member API task',
     });
 
+    // Retained resources are named by CloudFormation, not by us: a first
+    // create that rolls back keeps them, and fixed names would make the
+    // retry fail with "already exists". The outputs name them.
+
     // ---- Data ---------------------------------------------------------------
     this.table = new dynamodb.Table(this, 'Table', {
-      tableName: prefix,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -193,7 +196,6 @@ export class MemberServiceStack extends cdk.Stack {
     // operator adds its SHA-256 to the service vault's api-key-hashes
     // secret (README "Deployment"); until then every call is refused.
     const apiKey = new secretsmanager.Secret(this, 'ServiceVaultApiKey', {
-      secretName: `${prefix}/service-vault-api-key`,
       description: 'API key the member API presents to the service vault (SERVICE_VAULT_API_KEY)',
       generateSecretString: { passwordLength: 48, excludePunctuation: true, includeSpace: false },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -201,13 +203,11 @@ export class MemberServiceStack extends cdk.Stack {
     // The key of the hashes of addresses and codes: replacing it forgets
     // every open flow and rate-limit counter (sessions and the roster stay).
     const pepper = new secretsmanager.Secret(this, 'Pepper', {
-      secretName: `${prefix}/pepper`,
       description: 'Key of the hashes of email addresses and codes (MEMBER_API_PEPPER)',
       generateSecretString: { passwordLength: 64, excludePunctuation: true, includeSpace: false },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
     const originSecret = new secretsmanager.Secret(this, 'OriginVerify', {
-      secretName: `${prefix}/origin-verify`,
       description: `Header value CloudFront adds to /api/* requests (${ORIGIN_HEADER}); the member API refuses requests without it`,
       generateSecretString: { passwordLength: 48, excludePunctuation: true, includeSpace: false },
     });
@@ -240,7 +240,6 @@ export class MemberServiceStack extends cdk.Stack {
     );
 
     const logGroup = new logs.LogGroup(this, 'Logs', {
-      logGroupName: `/vettid/member-service/${envName}`,
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
@@ -332,7 +331,6 @@ export class MemberServiceStack extends cdk.Stack {
     stage.defaultRouteSettings = { throttlingRateLimit: 50, throttlingBurstLimit: 100 };
     // Request metadata only: no headers, cookies, bodies or addresses.
     const accessLogs = new logs.LogGroup(this, 'AccessLogs', {
-      logGroupName: `/vettid/member-service/${envName}/access`,
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
@@ -389,5 +387,9 @@ export class MemberServiceStack extends cdk.Stack {
     out('WebhookUrl', `https://${props.hostName}/api/webhooks/service-vault`, 'The service vault\'s webhookUrl');
     out('TaskSecurityGroupId', this.securityGroup.securityGroupId, 'The member API task\'s security group');
     out('ServiceVaultApiKeySecretArn', apiKey.secretArn, 'The API key (add its SHA-256 to the service vault\'s api-key-hashes)');
+    out('TableName', this.table.tableName, 'The DynamoDB table');
+    out('LogGroupName', logGroup.logGroupName, 'The member API\'s log group');
+    out('ServiceName', this.service.serviceName, 'The ECS service (force a new deployment to restart the task)');
+    out('ClusterName', cluster.clusterName, 'The ECS cluster');
   }
 }
