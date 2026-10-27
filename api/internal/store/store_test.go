@@ -43,7 +43,13 @@ func TestMem(t *testing.T) {
 			t.Fatalf("incr %d", n)
 		}
 	}
+	if n, _ := s.Count(ctx, "rate", "x"); n != 3 {
+		t.Fatalf("count %d", n)
+	}
 	now = now.Add(time.Hour)
+	if n, _ := s.Count(ctx, "rate", "x"); n != 0 {
+		t.Fatalf("count after the window %d", n)
+	}
 	if n, _ := s.Incr(ctx, "rate", "x", now.Add(time.Hour)); n != 1 {
 		t.Fatalf("after the window %d", n)
 	}

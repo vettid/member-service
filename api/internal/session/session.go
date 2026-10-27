@@ -24,6 +24,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -38,8 +39,14 @@ const (
 	CodeTTL        = 10 * time.Minute // a code works this long
 	CodeAttempts   = 5                // wrong codes per flow
 	CodesPerEmail  = 3                // codes per address per hour
-	CodesPerSource = 20               // codes per client address per hour
+	CodesPerDay    = 10               // codes per address per day
+	CodesPerSource = 20               // codes per client address (an IPv6 /64) per hour
+	// FailedVerifies caps wrong codes across all flows per hour: past it
+	// every verify is refused (and logged at ERROR, for an alarm), so
+	// guessing across many addresses stays bounded.
+	FailedVerifies = 200
 	RateWindow     = time.Hour
+	dayWindow      = 24 * time.Hour
 	SessionTTL     = 12 * time.Hour
 	// PollEvery bounds how often a status request asks the service vault
 	// itself, in case a webhook is late.
@@ -62,7 +69,12 @@ const (
 	kindMember  = "member"  // connection id -> member (the roster)
 	kindRate    = "rate"    // limit key -> counter
 	kindHook    = "hook"    // webhook event id (replay)
+	kindRemoved = "removed" // connection id -> "": removed, never a session again
 )
+
+// RemovedTTL is how long a removed connection is remembered: longer than
+// any flow lives.
+const RemovedTTL = 30 * 24 * time.Hour
 
 // Vault is the part of the service vault's SDK client the server uses.
 type Vault interface {
@@ -88,9 +100,23 @@ type Server struct {
 	// Go runs background work (sending a code); default a goroutine.
 	Go func(func())
 
-	// mu serializes read-modify-write of flows between status requests
-	// and webhooks. One task runs the member API (MEMBER-SERVICE-PLAN §9).
-	mu sync.Mutex
+	// locks serialize read-modify-write of one flow between requests and
+	// webhooks, striped by the flow's key so that one slow call holds up
+	// only the flows that share its stripe. One task runs the member API
+	// (MEMBER-SERVICE-PLAN §9); counters that must hold across tasks
+	// (attempts, limits) are the store's atomic Incr.
+	locks [256]sync.Mutex
+}
+
+// lock returns the stripe of a flow key (hex).
+func (s *Server) lock(fk string) *sync.Mutex {
+	var b byte
+	if len(fk) >= 2 {
+		if v, err := hex.DecodeString(fk[:2]); err == nil {
+			b = v[0]
+		}
+	}
+	return &s.locks[b]
 }
 
 func (s *Server) now() time.Time {
@@ -117,13 +143,30 @@ func (s *Server) goAsync(f func()) {
 
 func (s *Server) clientIP(r *http.Request) string {
 	if s.ClientIP != nil {
-		return s.ClientIP(r)
+		if ip := s.ClientIP(r); ip != "" {
+			return ip
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// sourceKey is the rate-limit key of a client address: an IPv6 address
+// counts as its /64 (one subscriber's prefix), anything else as itself.
+func sourceKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		p, _ := a.Prefix(64)
+		return p.String()
+	}
+	return a.String()
 }
 
 // mac is the keyed hash of a labelled value.
@@ -229,7 +272,6 @@ const (
 type flow struct {
 	EmailKey  string    `json:"email_key"`
 	CodeMAC   string    `json:"code_mac,omitempty"`
-	Attempts  int       `json:"attempts,omitempty"`
 	Stage     string    `json:"stage"`
 	InviteID  string    `json:"invite_id,omitempty"`
 	InviteURL string    `json:"invite_url,omitempty"`
@@ -268,9 +310,10 @@ func (s *Server) putJSON(ctx context.Context, kind, id string, v any, exp time.T
 	return s.Store.Put(ctx, kind, id, b, exp, ifAbsent)
 }
 
-// limited counts one use against key and reports whether it is over n.
-func (s *Server) limited(ctx context.Context, key string, n int) (bool, error) {
-	c, err := s.Store.Incr(ctx, kindRate, key, s.now().Add(RateWindow))
+// limited counts one use against key in a fixed window and reports
+// whether it is over n.
+func (s *Server) limited(ctx context.Context, key string, n int, window time.Duration) (bool, error) {
+	c, err := s.Store.Incr(ctx, kindRate, key, s.now().Add(window))
 	return c > n, err
 }
 
@@ -293,15 +336,27 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := s.now()
 	f := &flow{EmailKey: s.mac("email", addr), Stage: stageCode, Exp: now.Add(CodeTTL)}
-	overEmail, err := s.limited(ctx, "code:email:"+f.EmailKey, CodesPerEmail)
+	// The source first: a source over its limit does not use up the
+	// address's codes (so it cannot lock someone out of theirs).
+	overSource, err := s.limited(ctx, "code:source:"+s.mac("source", sourceKey(s.clientIP(r))), CodesPerSource, RateWindow)
 	if err != nil {
 		s.fail(w, "rate", err)
 		return
 	}
-	overSource, err := s.limited(ctx, "code:source:"+s.mac("source", s.clientIP(r)), CodesPerSource)
-	if err != nil {
-		s.fail(w, "rate", err)
-		return
+	overEmail := false
+	if !overSource {
+		for _, l := range []struct {
+			key string
+			n   int
+			win time.Duration
+		}{{"code:email:", CodesPerEmail, RateWindow}, {"code:email-day:", CodesPerDay, dayWindow}} {
+			over, err := s.limited(ctx, l.key+f.EmailKey, l.n, l.win)
+			if err != nil {
+				s.fail(w, "rate", err)
+				return
+			}
+			overEmail = overEmail || over
+		}
 	}
 	id, err := token()
 	if err != nil {
@@ -348,20 +403,6 @@ func leftPad6(n int64) string {
 	return string(b)
 }
 
-// flowFromCookie loads the visitor's flow; "" when there is none.
-func (s *Server) flowFromCookie(ctx context.Context, r *http.Request) (string, *flow, error) {
-	id := cookie(r, FlowCookie)
-	if id == "" {
-		return "", nil, nil
-	}
-	f := &flow{}
-	ok, err := s.getJSON(ctx, kindFlow, tokenKey(id), f)
-	if err != nil || !ok {
-		return "", nil, err
-	}
-	return id, f, nil
-}
-
 // connectVerify: {email, code}. A right code for the flow's address
 // makes the invitation, with email_verified: the address is proven.
 // Every refusal is the same invalid_code.
@@ -374,25 +415,51 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id, f, err := s.flowFromCookie(ctx, r)
-	if err != nil {
-		s.fail(w, "store", err)
+	id := cookie(r, FlowCookie)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "invalid_code")
 		return
 	}
-	if f == nil || f.Stage != stageCode && f.Stage != stageLimited || f.Attempts >= CodeAttempts {
+	fk := tokenKey(id)
+	mu := s.lock(fk)
+	mu.Lock()
+	defer mu.Unlock()
+	f := &flow{}
+	if ok, err := s.getJSON(ctx, kindFlow, fk, f); err != nil {
+		s.fail(w, "store", err)
+		return
+	} else if !ok || f.Stage != stageCode && f.Stage != stageLimited {
 		writeError(w, http.StatusBadRequest, "invalid_code")
+		return
+	}
+	// Past the global cap of wrong codes, every verify is refused, right
+	// or wrong, until the hour ends.
+	failedKey := "verify:failed:" + s.now().UTC().Truncate(RateWindow).Format(time.RFC3339)
+	if failed, err := s.Store.Count(ctx, kindRate, failedKey); err != nil {
+		s.fail(w, "rate", err)
+		return
+	} else if failed >= FailedVerifies {
+		writeError(w, http.StatusBadRequest, "invalid_code")
+		return
+	}
+	// Every try counts, atomically, before the code is compared: the
+	// count holds even if two tasks overlap.
+	n, err := s.Store.Incr(ctx, kindRate, "verify:"+fk, f.Exp)
+	if err != nil {
+		s.fail(w, "rate", err)
 		return
 	}
 	addr := mail.Normalize(req.Email)
 	okEmail := hmac.Equal([]byte(s.mac("email", addr)), []byte(f.EmailKey))
 	okCode := f.Stage == stageCode && hmac.Equal([]byte(s.mac("code", id+"\x00"+req.Code)), []byte(f.CodeMAC))
-	if !okEmail || !okCode {
-		f.Attempts++
-		if err := s.putJSON(ctx, kindFlow, tokenKey(id), f, f.Exp, false); err != nil {
-			s.fail(w, "store", err)
+	if n > CodeAttempts || !okEmail || !okCode {
+		g, err := s.Store.Incr(ctx, kindRate, failedKey, s.now().Add(RateWindow))
+		if err != nil {
+			s.fail(w, "rate", err)
 			return
+		}
+		if g == FailedVerifies {
+			s.log().Error("wrong codes reached the global limit: every verify refused until the hour ends", "limit", FailedVerifies)
 		}
 		writeError(w, http.StatusBadRequest, "invalid_code")
 		return
@@ -405,11 +472,11 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	f.Stage, f.CodeMAC, f.InviteID, f.InviteURL, f.InviteExp = stageInvite, "", inv.ID, inv.URL, inv.ExpiresAt
 	f.Exp = inv.ExpiresAt.Add(5 * time.Minute) // the status page outlives the invitation a little
-	if err := s.putJSON(ctx, kindFlow, tokenKey(id), f, f.Exp, false); err != nil {
+	if err := s.putJSON(ctx, kindFlow, fk, f, f.Exp, false); err != nil {
 		s.fail(w, "store", err)
 		return
 	}
-	if err := s.Store.Put(ctx, kindInvite, inv.ID, []byte(tokenKey(id)), f.Exp, false); err != nil {
+	if err := s.Store.Put(ctx, kindInvite, inv.ID, []byte(fk), f.Exp, false); err != nil {
 		s.fail(w, "store", err)
 		return
 	}
@@ -423,14 +490,19 @@ func (s *Server) connectVerify(w http.ResponseWriter, r *http.Request) {
 // every PollEvery, in case a webhook is late.
 func (s *Server) connectStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id, f, err := s.flowFromCookie(ctx, r)
-	if err != nil {
-		s.fail(w, "store", err)
+	id := cookie(r, FlowCookie)
+	if id == "" {
+		writeError(w, http.StatusNotFound, "no_flow")
 		return
 	}
-	if f == nil {
+	mu := s.lock(tokenKey(id))
+	mu.Lock()
+	defer mu.Unlock()
+	f := &flow{}
+	if ok, err := s.getJSON(ctx, kindFlow, tokenKey(id), f); err != nil {
+		s.fail(w, "store", err)
+		return
+	} else if !ok {
 		writeError(w, http.StatusNotFound, "no_flow")
 		return
 	}
@@ -455,7 +527,13 @@ func (s *Server) connectStatus(w http.ResponseWriter, r *http.Request) {
 	case stageSAS:
 		writeJSON(w, http.StatusOK, map[string]any{"status": "sas", "sas": f.SAS, "expires_at": f.InviteExp.UTC()})
 	case stageConnected:
-		if err := s.startSession(ctx, w, f.ConnID); err != nil {
+		if err := s.startSession(ctx, w, f.ConnID); errors.Is(err, errRemoved) {
+			// Removed since: no session, ever.
+			_ = s.Store.Delete(ctx, kindFlow, tokenKey(id))
+			setCookie(w, FlowCookie, "", 0)
+			writeJSON(w, http.StatusOK, map[string]any{"status": stageExpired})
+			return
+		} else if err != nil {
 			s.fail(w, "session", err)
 			return
 		}
@@ -486,12 +564,21 @@ func applyInviteStatus(f *flow, st *servicevault.InviteStatus) {
 
 // --- sessions ---
 
+// errRemoved: the connection was removed; it never gets a session again.
+var errRemoved = errors.New("session: connection removed")
+
 // startSession makes a session for the connection and sets its cookie.
 // The roster entry is created if the connection.added webhook has not
-// arrived yet (it fills in the name).
+// arrived yet (it fills in the name), unless the connection was removed
+// in the meantime (errRemoved).
 func (s *Server) startSession(ctx context.Context, w http.ResponseWriter, connID string) error {
 	if connID == "" {
 		return errors.New("session: no connection")
+	}
+	if _, removed, err := s.Store.Get(ctx, kindRemoved, connID); err != nil {
+		return err
+	} else if removed {
+		return errRemoved
 	}
 	now := s.now()
 	if err := s.putJSON(ctx, kindMember, connID, &Member{Joined: now.UTC()}, time.Time{}, true); err != nil && !errors.Is(err, store.ErrExists) {
@@ -582,12 +669,19 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 		} else if ok && !old.Joined.IsZero() {
 			m.Joined = old.Joined
 		}
+		if _, removed, err := s.Store.Get(ctx, kindRemoved, h.ConnectionID); err != nil || removed {
+			return err
+		}
 		if err := s.putJSON(ctx, kindMember, h.ConnectionID, m, time.Time{}, false); err != nil {
 			return err
 		}
 		return s.updateFlow(ctx, ev.InviteID, func(f *flow) { f.Stage, f.ConnID = stageConnected, h.ConnectionID })
 	case *servicevault.ConnectionDeclined:
-		return s.updateFlow(ctx, ev.InviteID, func(f *flow) { f.Stage = stageDeclined })
+		return s.updateFlow(ctx, ev.InviteID, func(f *flow) {
+			if f.Stage != stageConnected {
+				f.Stage = stageDeclined
+			}
+		})
 	case *servicevault.ConnectionExpired:
 		return s.updateFlow(ctx, ev.InviteID, func(f *flow) {
 			if f.Stage != stageConnected {
@@ -595,7 +689,12 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 			}
 		})
 	case *servicevault.ConnectionRemoved:
-		// Off the roster; its sessions end at their next use (Member).
+		// Remembered, so that a flow still at connected cannot bring it
+		// back; off the roster, and its sessions end at their next use
+		// (Member).
+		if err := s.Store.Put(ctx, kindRemoved, h.ConnectionID, nil, s.now().Add(RemovedTTL), false); err != nil {
+			return err
+		}
 		return s.Store.Delete(ctx, kindMember, h.ConnectionID)
 	}
 	return nil
@@ -603,12 +702,13 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 
 // updateFlow applies change to the flow of an invitation, if any.
 func (s *Server) updateFlow(ctx context.Context, inviteID string, change func(*flow)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	fk, ok, err := s.Store.Get(ctx, kindInvite, inviteID)
 	if err != nil || !ok {
 		return err
 	}
+	mu := s.lock(string(fk))
+	mu.Lock()
+	defer mu.Unlock()
 	f := &flow{}
 	found, err := s.getJSON(ctx, kindFlow, string(fk), f)
 	if err != nil || !found {

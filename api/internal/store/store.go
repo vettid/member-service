@@ -36,6 +36,8 @@ type Store interface {
 	// that does not exist or has expired starts again at 1 and lives
 	// until exp.
 	Incr(ctx context.Context, kind, id string, exp time.Time) (int, error)
+	// Count returns a live counter's value (0 when absent or expired).
+	Count(ctx context.Context, kind, id string) (int, error)
 }
 
 type memRecord struct {
@@ -119,5 +121,16 @@ func (s *Mem) Incr(_ context.Context, kind, id string, exp time.Time) (int, erro
 		k[id] = r
 	}
 	r.n++
+	return r.n, nil
+}
+
+// Count implements Store.
+func (s *Mem) Count(_ context.Context, kind, id string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.m[kind][id]
+	if !s.live(r) {
+		return 0, nil
+	}
 	return r.n, nil
 }

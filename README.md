@@ -37,8 +37,8 @@ A `POST` must have `Content-Type: application/json`.
 
 | Route | |
 |---|---|
-| `POST /api/connect/start` `{email}` | Emails a 6-digit one-time code and sets the flow cookie. Always `202 {expires_at}`, whether or not a code was sent (rate limits: 3 codes per address and 20 per client address per hour). `bad_email` for something that is not an address |
-| `POST /api/connect/verify` `{email, code}` | A right code (10 minutes, 5 tries) for the flow's address asks the service vault for an invitation with `email_verified: true`. Returns `{url, expires_at}`: the button on mobile, the QR code on desktop. Every refusal is `invalid_code` |
+| `POST /api/connect/start` `{email}` | Emails a 6-digit one-time code and sets the flow cookie. Always `202 {expires_at}`, whether or not a code was sent. Rate limits: 3 codes per address per hour and 10 per day; 20 per client address per hour, where an IPv6 address counts as its /64. A source over its limit doesn't use up the address's codes. `bad_email` for something that is not an address |
+| `POST /api/connect/verify` `{email, code}` | A right code (10 minutes, 5 tries, counted atomically) for the flow's address asks the service vault for an invitation with `email_verified: true`. Returns `{url, expires_at}`: the button on mobile, the QR code on desktop. Every refusal is `invalid_code`. After 200 wrong codes in an hour across all flows, every verify is refused until the hour ends, and an ERROR is logged for alarms |
 | `GET /api/connect/status` | `{status}`: `code`, `waiting` (with `url`), `sas` (with `sas`, to compare on the phone), `connected` (the session cookie is set), `declined` or `expired` |
 | `GET /api/me` | `{connection_id, name, joined}`, or `401 signed_out` |
 | `POST /api/signout` | `204`, and the session ends |
@@ -52,7 +52,11 @@ connection only because the code proved control of it (service-vault
 README, "Email binding"). Logs carry ids, types and error codes, never
 addresses, codes or tokens. Status requests ask the service vault
 directly, at most every 2 seconds, so a late webhook doesn't hold up a
-connection.
+connection. A connection removed while its flow is still open gets no
+session. Someone who forwards their own invitation link to another
+person would bind their address to that person's phone. The SAS that
+the site and the phone both show is the defence against this, so the
+site asks the visitor to compare it.
 
 ### Configuration
 
@@ -65,7 +69,10 @@ From the environment (see `.env.example`):
 - exactly one of `MAIL_FROM` (SES, from a verified domain identity) and
   `MAIL_DIR` (local development: codes are written to files)
 - `CLIENT_IP_HEADER`, which is `CloudFront-Viewer-Address` behind
-  CloudFront
+  CloudFront. It needs `ORIGIN_VERIFY_SECRET` (at least 32 bytes): the
+  secret the edge sends as `X-Origin-Verify`. Requests without it get
+  `403`, except `/api/health`, so the origin can't be reached around
+  the edge.
 
 ## Build and test
 

@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
@@ -67,13 +68,18 @@ type cfg struct {
 	MailFrom     string // MAIL_FROM: SES
 	MailDir      string // MAIL_DIR: local development, instead of SES
 	ClientIPFrom string // CLIENT_IP_HEADER
+	OriginSecret []byte // ORIGIN_VERIFY_SECRET
 }
+
+// OriginHeader carries the secret the edge (CloudFront) adds to every
+// request it forwards (vettid.org StaticSite apiOriginHeaders).
+const OriginHeader = "X-Origin-Verify"
 
 func loadConfig(getenv func(string) string) (*cfg, error) {
 	c := &cfg{Addr: getenv("MEMBER_API_ADDR"), VaultURL: getenv("SERVICE_VAULT_URL"), VaultKey: getenv("SERVICE_VAULT_API_KEY"),
 		VaultPin: getenv("SERVICE_VAULT_PIN"), WebhookKey: []byte(getenv("WEBHOOK_SECRET")), Pepper: []byte(getenv("MEMBER_API_PEPPER")),
 		Table: getenv("DYNAMODB_TABLE"), DynamoURL: getenv("DYNAMODB_ENDPOINT"), MailFrom: getenv("MAIL_FROM"),
-		MailDir: getenv("MAIL_DIR"), ClientIPFrom: getenv("CLIENT_IP_HEADER")}
+		MailDir: getenv("MAIL_DIR"), ClientIPFrom: getenv("CLIENT_IP_HEADER"), OriginSecret: []byte(getenv("ORIGIN_VERIFY_SECRET"))}
 	var missing []string
 	for name, v := range map[string]string{"MEMBER_API_ADDR": c.Addr, "SERVICE_VAULT_URL": c.VaultURL, "SERVICE_VAULT_API_KEY": c.VaultKey,
 		"SERVICE_VAULT_PIN": c.VaultPin, "DYNAMODB_TABLE": c.Table} {
@@ -87,14 +93,39 @@ func loadConfig(getenv func(string) string) (*cfg, error) {
 	if len(c.WebhookKey) < webhook.MinSecretLen || len(c.Pepper) < 32 {
 		return nil, errors.New("WEBHOOK_SECRET and MEMBER_API_PEPPER must be at least 32 bytes")
 	}
+	if len(c.OriginSecret) > 0 && len(c.OriginSecret) < 32 {
+		return nil, errors.New("ORIGIN_VERIFY_SECRET must be at least 32 bytes")
+	}
+	if c.ClientIPFrom != "" && len(c.OriginSecret) == 0 {
+		// The header is trusted only from the edge.
+		return nil, errors.New("CLIENT_IP_HEADER needs ORIGIN_VERIFY_SECRET")
+	}
 	if (c.MailFrom == "") == (c.MailDir == "") {
 		return nil, errors.New("set exactly one of MAIL_FROM (SES) and MAIL_DIR (local development)")
 	}
 	return c, nil
 }
 
+// fromEdge refuses requests without the edge's secret header (403), so
+// the origin cannot be reached around CloudFront and the client-address
+// header cannot be forged. /api/health is exempt (the load balancer's
+// and ECS's checks come straight to the task).
+func fromEdge(secret []byte, next http.Handler) http.Handler {
+	if len(secret) == 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" && subtle.ConstantTimeCompare([]byte(r.Header.Get(OriginHeader)), secret) != 1 {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // clientIP reads the visitor's address from a header the edge sets and
-// the visitor cannot (CloudFront-Viewer-Address: "address:port").
+// the visitor cannot (CloudFront-Viewer-Address: "address:port"); ""
+// (the server then uses the remote address) when it is missing.
 func clientIP(header string) func(*http.Request) string {
 	if header == "" {
 		return nil
@@ -140,7 +171,7 @@ func serve(log *slog.Logger, getenv func(string) string) error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	srv := &http.Server{Addr: c.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+	srv := &http.Server{Addr: c.Addr, Handler: fromEdge(c.OriginSecret, mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn)}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()

@@ -12,7 +12,7 @@ func TestValid(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"a@example.org": true, "first.last+tag@sub.example.org": true,
 		"": false, "a": false, "@example.org": false, "a@": false, "a@example": false, "a@@example.org": false,
-		"a b@example.org": false, "a@example.org.": false, "a@.example.org": false, "a\n@example.org": false,
+		"a b@example.org": false, "a\n@example.org": false, "<a@example.org>": false, `"a"@example.org`: false, "Ada <a@example.org>": false,
 		strings.Repeat("a", 250) + "@x.org": false,
 	} {
 		if Valid(addr) != want {

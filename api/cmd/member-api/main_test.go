@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -26,6 +27,14 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal("a short pepper")
 	}
 	env["MEMBER_API_PEPPER"] = strings.Repeat("p", 32)
+	env["CLIENT_IP_HEADER"] = "CloudFront-Viewer-Address"
+	if _, err := loadConfig(get); err == nil {
+		t.Fatal("a client-address header trusted without the edge's secret")
+	}
+	env["ORIGIN_VERIFY_SECRET"] = strings.Repeat("o", 32)
+	if _, err := loadConfig(get); err != nil {
+		t.Fatal(err)
+	}
 	delete(env, "SERVICE_VAULT_PIN")
 	if _, err := loadConfig(get); err == nil || !strings.Contains(err.Error(), "SERVICE_VAULT_PIN") {
 		t.Fatalf("missing pin: %v", err)
@@ -46,5 +55,29 @@ func TestClientIP(t *testing.T) {
 	}
 	if clientIP("") != nil {
 		t.Fatal("no header: the server's default")
+	}
+}
+
+// Behind the edge, only requests with its secret header are served
+// (health checks excepted).
+func TestFromEdge(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	h := fromEdge([]byte(strings.Repeat("s", 32)), ok)
+	for _, c := range []struct {
+		path, header string
+		want         int
+	}{{"/api/me", "", 403}, {"/api/me", "wrong", 403}, {"/api/me", strings.Repeat("s", 32), 204}, {"/api/health", "", 204}} {
+		r := httptest.NewRequest("GET", c.path, nil)
+		if c.header != "" {
+			r.Header.Set(OriginHeader, c.header)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Errorf("%s %q: %d", c.path, c.header, w.Code)
+		}
+	}
+	if fromEdge(nil, ok) == nil {
+		t.Fatal("no secret: unwrapped")
 	}
 }

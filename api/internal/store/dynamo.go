@@ -175,3 +175,16 @@ func (s *Dynamo) Incr(ctx context.Context, kind, id string, exp time.Time) (int,
 	}
 	return 0, errors.New("store: counter contended")
 }
+
+// Count implements Store.
+func (s *Dynamo) Count(ctx context.Context, kind, id string) (int, error) {
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(s.Table), Key: key(kind, id), ConsistentRead: aws.Bool(true)})
+	if err != nil || out.Item == nil || !s.live(out.Item) {
+		return 0, err
+	}
+	v, ok := out.Item["n"].(*types.AttributeValueMemberN)
+	if !ok {
+		return 0, nil
+	}
+	return strconv.Atoi(v.Value)
+}

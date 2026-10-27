@@ -9,9 +9,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	netmail "net/mail"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
@@ -79,14 +81,20 @@ func (d *Dir) SendCode(_ context.Context, to, code string) error {
 // member API's own key for rate limits and flows.
 func Normalize(addr string) string { return strings.ToLower(strings.TrimSpace(addr)) }
 
-// Valid reports whether addr looks like an address: one @, something on
-// both sides, a dot in the domain, at most 254 bytes, no spaces or
-// control characters. The code email is the real check.
+// Valid reports whether addr (normalized) is an address the service
+// vault accepts: the same rule as its NormalizeEmail (service-vault
+// internal/connect), so that a visitor never gets a code for an address
+// the invitation would then refuse. At most 254 bytes, valid UTF-8, no
+// angle brackets, parentheses, quotes or spaces, a bare RFC 5322 address
+// (net/mail), and a dot in the domain.
 func Valid(addr string) bool {
-	if len(addr) > 254 || strings.ContainsFunc(addr, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+	if addr == "" || len(addr) > 254 || !utf8.ValidString(addr) || strings.ContainsAny(addr, "<>()\" \t\r\n") {
 		return false
 	}
-	local, domain, ok := strings.Cut(addr, "@")
-	return ok && local != "" && !strings.Contains(domain, "@") && strings.Contains(domain, ".") &&
-		!strings.HasPrefix(domain, ".") && !strings.HasSuffix(domain, ".")
+	a, err := netmail.ParseAddress(addr)
+	if err != nil || a.Name != "" || a.Address != addr {
+		return false
+	}
+	at := strings.LastIndexByte(addr, '@')
+	return at > 0 && at < len(addr)-1 && strings.Contains(addr[at+1:], ".")
 }

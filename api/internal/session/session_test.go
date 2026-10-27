@@ -357,3 +357,106 @@ func TestRequestChecks(t *testing.T) {
 		t.Fatalf("status without a flow: %d", w.Code)
 	}
 }
+
+// A connection removed while its flow still says connected never gets a
+// session, nor a roster entry back.
+func TestRemovedBeforeSession(t *testing.T) {
+	f := newFixture(t)
+	f.verify()
+	f.hook("01EVADDED", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada", "email_bound": true})
+	f.hook("01EVREMOVED", "connection.removed", "c1", map[string]any{"direction": "in"})
+	if w := f.do("GET", "/api/connect/status", ""); field(t, w, "status") != "expired" || f.jar[SessionCookie] != "" {
+		t.Fatalf("status after removal: %s %v", w.Body, f.jar)
+	}
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "c1"); ok {
+		t.Fatal("the removed connection is back on the roster")
+	}
+	// A late connection.added for it changes nothing either.
+	f.hook("01EVADDED2", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada", "email_bound": true})
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "c1"); ok {
+		t.Fatal("a late connection.added brought it back")
+	}
+	// A late decline does not undo a connection.
+	f.jar = map[string]string{}
+	f.now = f.now.Add(RateWindow)
+	f.verify()
+	f.hook("01EVADDED3", "connection.added", "c2", map[string]any{"invite_id": "inv2", "name": "Bo", "email_bound": true})
+	f.hook("01EVDECLINED3", "connection.declined", "", map[string]any{"invite_id": "inv2"})
+	if w := f.do("GET", "/api/connect/status", ""); field(t, w, "status") != "connected" {
+		t.Fatalf("a decline after the connection: %s", w.Body)
+	}
+}
+
+// Past FailedVerifies wrong codes in the hour, every verify is refused,
+// even with the right code; the next hour it works again.
+func TestGlobalFailedVerifies(t *testing.T) {
+	f := newFixture(t)
+	f.now = f.now.Truncate(RateWindow)
+	for i := 0; i < FailedVerifies; i++ {
+		f.jar = map[string]string{}
+		f.ip = fmt.Sprintf("198.51.100.%d", i%250)
+		f.do("POST", "/api/connect/start", fmt.Sprintf(`{"email":"g%d@example.org"}`, i))
+		f.do("POST", "/api/connect/verify", fmt.Sprintf(`{"email":"g%d@example.org","code":"x"}`, i))
+	}
+	f.jar = map[string]string{}
+	f.ip = "203.0.113.1"
+	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
+	code := f.mail.code(addr)
+	if w := f.do("POST", "/api/connect/verify", `{"email":"`+addr+`","code":"`+code+`"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("a verify past the global cap: %s", w.Body)
+	}
+	// The next hour (the old code has expired with it), a new flow works.
+	f.now = f.now.Add(RateWindow)
+	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
+	if w := f.do("POST", "/api/connect/verify", `{"email":"`+addr+`","code":"`+f.mail.code(addr)+`"}`); w.Code != http.StatusOK {
+		t.Fatalf("the next hour: %s", w.Body)
+	}
+}
+
+// Sources: an IPv6 /64 is one source; a source over its limit does not
+// use up an address's codes; an address gets CodesPerDay codes a day.
+func TestSourcesAndDailyCap(t *testing.T) {
+	f := newFixture(t)
+	sent := f.mail.sent
+	for i := 0; i < CodesPerSource+5; i++ {
+		f.ip = fmt.Sprintf("2001:db8:1:2::%x", i+1)
+		f.do("POST", "/api/connect/start", fmt.Sprintf(`{"email":"v%d@example.org"}`, i))
+	}
+	if f.mail.sent-sent != CodesPerSource {
+		t.Fatalf("%d codes from one /64", f.mail.sent-sent)
+	}
+	// Still over: the victim's address is not charged.
+	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
+	f.ip = "203.0.113.5"
+	sent = f.mail.sent
+	f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
+	if f.mail.sent != sent+1 {
+		t.Fatal("a source over its limit used up the address's codes")
+	}
+	// The daily cap: CodesPerEmail an hour, CodesPerDay in all.
+	f.now = f.now.Add(RateWindow)
+	n := 1
+	for h := 0; h < 23; h++ {
+		f.ip = fmt.Sprintf("203.0.113.%d", 10+h)
+		for i := 0; i < CodesPerEmail; i++ {
+			before := f.mail.sent
+			f.do("POST", "/api/connect/start", `{"email":"`+addr+`"}`)
+			n += f.mail.sent - before
+		}
+		f.now = f.now.Add(RateWindow)
+	}
+	if n != CodesPerDay {
+		t.Fatalf("%d codes in a day", n)
+	}
+}
+
+func TestSourceKey(t *testing.T) {
+	for ip, want := range map[string]string{
+		"198.51.100.7": "198.51.100.7", "::ffff:198.51.100.7": "198.51.100.7",
+		"2001:db8:1:2::7": "2001:db8:1:2::/64", "2001:db8:1:2:ffff::1": "2001:db8:1:2::/64", "junk": "junk",
+	} {
+		if got := sourceKey(ip); got != want {
+			t.Errorf("%s: %s", ip, got)
+		}
+	}
+}

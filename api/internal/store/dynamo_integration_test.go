@@ -95,6 +95,12 @@ func TestDynamo(t *testing.T) {
 	if n, err := s.Incr(ctx, "rate", "x", now.Add(time.Hour)); err != nil || n != 21 {
 		t.Fatalf("after 20 concurrent increments: %d %v", n, err)
 	}
+	if n, err := s.Count(ctx, "rate", "x"); err != nil || n != 21 {
+		t.Fatalf("count %d %v", n, err)
+	}
+	if n, err := s.Count(ctx, "rate", "none"); err != nil || n != 0 {
+		t.Fatalf("count of none %d %v", n, err)
+	}
 	now = now.Add(time.Hour)
 	if n, _ := s.Incr(ctx, "rate", "x", now.Add(time.Hour)); n != 1 {
 		t.Fatalf("after the window: %d", n)
