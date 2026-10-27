@@ -1,0 +1,106 @@
+/**
+ * VettID Self-Hosted Fonts
+ *
+ * Fonts are licensed under the SIL Open Font License 1.1
+ * - Inter: https://rsms.me/inter/ (Rasmus Andersson)
+ * - Plus Jakarta Sans: https://github.com/niclasinohia/PlusJakartaSans (Glow Type)
+ */
+
+/* Force form controls to inherit page typography. Browsers default
+   <button>/<input>/<select>/<textarea> to a UA "form" font (Arial-ish)
+   that ignores body font-family — that's why portal sidebar tabs and
+   the "Load Individual Votes" button rendered off. Living here so any
+   page that pulls fonts.css gets the correct typography on its form
+   elements without also having to pull /assets/styles.css. */
+button,
+input,
+select,
+textarea,
+optgroup {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ============================================
+   INTER - Body Text Font
+   ============================================ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/assets/fonts/inter-regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/assets/fonts/inter-medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/assets/fonts/inter-semibold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/assets/fonts/inter-bold.woff2') format('woff2');
+}
+
+/* ============================================
+   PLUS JAKARTA SANS - Display/Headline Font
+   ============================================ */
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/assets/fonts/plusjakartasans-medium.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/assets/fonts/plusjakartasans-semibold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/assets/fonts/plusjakartasans-bold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+  src: url('/assets/fonts/plusjakartasans-extrabold.woff2') format('woff2');
+}
+
+/* ============================================
+   IBM PLEX MONO - Evidence/utility face
+   ============================================ */
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/assets/fonts/ibmplexmono-500.woff2') format('woff2');
+}

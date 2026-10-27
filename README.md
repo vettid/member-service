@@ -23,11 +23,33 @@ decisions and its phases are in
 
 | Path | Contents |
 |---|---|
-| `web/` | Static site: HTML/CSS/JS, self-hosted assets, zero-tracker |
+| `web/` | Static site: HTML/CSS/JS, self-hosted assets, zero-tracker (see "Site") |
+| `site-test/` | The site's tests: pages against a scripted API, and its CSP rules (Node's built-in runner, no dependencies) |
 | `api/` | Go backend (`api/cmd/member-api`) |
 | `contracts/` | Draft member and admin contracts |
 | `cdk/` | Infrastructure (Phase 2) |
 | `docs/` | Plan and runbook |
+
+## Site
+
+Plain HTML, CSS and JavaScript modules with no build step, served by
+vettid.org's StaticSite construct (row 2.3) under its headers:
+`script-src 'self'` and `style-src 'self'` with nothing inline, Trusted
+Types (pages build nodes with `createElement` and `textContent` only),
+and `Referrer-Policy: no-referrer`. The API is same-origin under `/api`.
+
+| Page | |
+|---|---|
+| `/` | What the service is; Join or Sign in. A signed-in member goes home |
+| `/connect/` | Join (§4.1): the email and its code, then the invitation (a button on a phone, a QR code drawn in the page on a computer), then the SAS to compare on the phone. A reload resumes the step |
+| `/signin/` | Sign in (§4.2): the email, then the match code to compare on the phone. It reads the same whether or not the address is a member's |
+| `/home/` | The member: name, join date, the member count, and for an admin the names |
+
+`styles.css`, the fonts and logos, and `js/{dom,ui,qr,theme,theme-init}.js`
+with the vendored QR encoder (MIT, `js/vendor/`) are copies from the
+vettid.org account site (`sites/account`), so the two sites look alike;
+keep them unchanged and refresh them from there. The member service's
+own styles are in `member.css`.
 
 ## Member API
 
@@ -84,6 +106,7 @@ make build        # bin/member-api
 make test         # go test ./...
 make lint         # go vet + staticcheck
 MS_IT_LOCALSTACK=http://127.0.0.1:4566 go test -tags integration ./api/internal/store/   # DynamoDB on LocalStack
+node --test site-test/*.test.mjs   # the site (Node 22)
 ```
 
 Requires Go 1.26 (`go.mod` pins the toolchain). Local configuration goes

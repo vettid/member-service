@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b0b12" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f4f6" media="(prefers-color-scheme: light)">
+  <title>Join · VettID Member Service</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/png" href="/assets/favicon.png">
+  <script src="/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/assets/fonts.css">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/member.css">
+  <script type="module" src="/js/theme.js"></script>
+  <script type="module" src="/js/connect.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="VettID Member Service home">
+      <img class="brand-logo brand-logo-dark" src="/assets/vettid-horizontal-transparent.svg" alt="" width="752" height="300">
+      <img class="brand-logo brand-logo-light" src="/assets/vettid-horizontal-transparent-on-light.svg" alt="" width="752" height="300">
+      <img class="brand-icon" src="/assets/favicon.svg" alt="" width="512" height="512">
+      <span class="brand-tag">Members</span>
+    </a>
+    <div class="header-tools">
+      <button type="button" class="theme-btn" id="theme-toggle" hidden></button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div class="page-head">
+      <span class="eyebrow">Join</span>
+      <h1>Connect with VettID</h1>
+      <p>You need the VettID app on your phone. Three steps: confirm your email address, open the invitation in the app, then check the code and approve.</p>
+    </div>
+    <div id="errors" class="msg-region" role="alert" aria-atomic="true"></div>
+    <div id="notices" class="msg-region" role="status" aria-atomic="true"></div>
+    <section class="card" id="step-email" aria-labelledby="email-title" hidden>
+      <h2 id="email-title">1. Your email address</h2>
+      <p>We'll email you a 6-digit code. Your address lets you sign in later; we keep only a keyed hash of it, never the address itself.</p>
+      <form id="email-form" class="form-grid">
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" spellcheck="false">
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn btn-primary">Email me a code</button>
+        </div>
+      </form>
+    </section>
+    <section class="card" id="step-code" aria-labelledby="code-title" tabindex="-1" hidden>
+      <h2 id="code-title">2. Enter the code</h2>
+      <p>We sent a 6-digit code to <strong id="code-to"></strong>, if the address can receive it. It works for 10 minutes. Check your spam or junk folder too.</p>
+      <form id="code-form" class="form-grid">
+        <div class="field" id="code-email-field" hidden>
+          <label for="code-email">Email address</label>
+          <input id="code-email" name="email" type="email" autocomplete="email" maxlength="254" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="code">Code</label>
+          <input id="code" name="code" class="pin" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required spellcheck="false">
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn btn-primary">Continue</button>
+          <button type="button" class="link-btn" id="restart">Use a different email</button>
+        </div>
+      </form>
+    </section>
+    <section class="card" id="step-invite" aria-labelledby="invite-title" tabindex="-1" hidden>
+      <h2 id="invite-title">3. Open the invitation in VettID</h2>
+      <p class="touch-only">On this phone, open the invitation in the VettID app.</p>
+      <p class="pointer-only">Scan the code with the VettID app on your phone, or open the link on the phone.</p>
+      <div class="actions">
+        <a class="btn btn-primary" id="invite-link" rel="noopener">Open in VettID</a>
+      </div>
+      <div class="code-box pointer-only" id="invite-qr"></div>
+      <p class="muted" id="invite-exp"></p>
+    </section>
+    <section class="card" id="step-sas" aria-labelledby="sas-title" tabindex="-1" hidden>
+      <h2 id="sas-title">Check the code on your phone</h2>
+      <p>Your phone shows a code for this connection. Approve it on the phone <strong>only if it matches</strong> the code here. If it doesn't match, decline: someone else may have opened your invitation.</p>
+      <div class="code-box">
+        <span class="code-label">This connection's code</span>
+        <span class="big-code" id="sas"></span>
+      </div>
+    </section>
+    <section class="card result" id="step-end" aria-labelledby="end-title" tabindex="-1" hidden>
+      <h2 id="end-title"></h2>
+      <p id="end-text"></p>
+      <div class="actions">
+        <button type="button" class="btn btn-primary" id="again">Start again</button>
+      </div>
+    </section>
+    <p class="guide-link"><a href="/signin/">Already a member? Sign in <span aria-hidden="true">→</span></a></p>
+  </main>
+  <footer class="site-footer">
+    <ul>
+      <li><a href="https://vettid.org">vettid.org</a></li>
+      <li><a href="https://vettid.org/security/">Privacy &amp; security</a></li>
+      <li><a href="mailto:support@vettid.org">support@vettid.org</a></li>
+    </ul>
+  </footer>
+</body>
+</html>
