@@ -33,6 +33,16 @@ func (v *vault) SignInStatus(_ context.Context, id string) (*servicevault.SignIn
 	return &c, nil
 }
 
+func (v *vault) Admins(context.Context) (*servicevault.Admins, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.adminAsk++
+	if v.adminErr != nil {
+		return nil, v.adminErr
+	}
+	return &servicevault.Admins{Admins: append([]string(nil), v.admins...), Threshold: 1}, nil
+}
+
 // connected makes c1 ("Ada") a member and leaves the browser signed out.
 func (f *fixture) connected() {
 	f.t.Helper()
@@ -171,7 +181,8 @@ func TestSignInLimitsAndChecks(t *testing.T) {
 	}
 }
 
-// The roster is for members: names and join times, no connection ids.
+// The roster is for members: its size to every member, the names and
+// join times to admins only, and connection ids to nobody.
 func TestMembers(t *testing.T) {
 	f := newFixture(t)
 	if w := f.do("GET", "/api/members", ""); w.Code != http.StatusUnauthorized {
@@ -183,12 +194,41 @@ func TestMembers(t *testing.T) {
 	f.verify()
 	f.hook("01EVADDED", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada"})
 	f.do("GET", "/api/connect/status", "")
+
 	w := f.do("GET", "/api/members", "")
-	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "c0") || strings.Contains(w.Body.String(), "connection_id") {
-		t.Fatalf("members: %d %s", w.Code, w.Body)
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"count":2}` {
+		t.Fatalf("member: %d %s", w.Code, w.Body)
 	}
-	if b := w.Body.String(); !strings.Contains(b, `"count":2`) || strings.Index(b, "Bob") > strings.Index(b, "Ada") {
-		t.Fatalf("members: %s", b)
+	if w := f.do("GET", "/api/me", ""); strings.Contains(w.Body.String(), `"admin":true`) {
+		t.Fatalf("me: %s", w.Body)
+	}
+
+	// Made an admin: the webhook replaces the cached set at once.
+	f.hook("01EVADMIN", "admin_set.changed", "c1", map[string]any{"admins": []string{"c1"}, "added": "c1", "reason": "bootstrap"})
+	w = f.do("GET", "/api/members", "")
+	b := w.Body.String()
+	if !strings.Contains(b, `"count":2`) || !strings.Contains(b, "Ada") || strings.Index(b, "Bob") > strings.Index(b, "Ada") ||
+		strings.Contains(b, "c0") || strings.Contains(b, "connection_id") {
+		t.Fatalf("admin: %s", b)
+	}
+	if w := f.do("GET", "/api/me", ""); !strings.Contains(w.Body.String(), `"admin":true`) {
+		t.Fatalf("me: %s", w.Body)
+	}
+
+	// After the cache's time the service vault is asked again; when it
+	// cannot answer, nobody is an admin.
+	f.hook("01EVADMIN2", "admin_set.changed", "c0", map[string]any{"admins": []string{"c1"}, "removed": "c0", "reason": "approval"})
+	f.now = f.now.Add(AdminsTTL)
+	f.vault.adminErr = &servicevault.APIError{Status: http.StatusServiceUnavailable, Code: servicevault.CodeUnavailable}
+	if w := f.do("GET", "/api/members", ""); strings.TrimSpace(w.Body.String()) != `{"count":2}` {
+		t.Fatalf("vault down: %s", w.Body)
+	}
+	f.vault.adminErr = nil
+	f.vault.admins = []string{"c1"}
+	asks := f.vault.adminAsk
+	f.do("GET", "/api/members", "")
+	if w := f.do("GET", "/api/members", ""); !strings.Contains(w.Body.String(), "Ada") || f.vault.adminAsk != asks+1 {
+		t.Fatalf("asked %d times: %s", f.vault.adminAsk-asks, w.Body)
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/vettid/member-service/api/internal/mail"
@@ -233,11 +235,61 @@ func (s *Server) updateSignIn(ctx context.Context, signInID string, change func(
 
 // --- roster (§6) ---
 
-// members lists the roster to a signed-in member: names and join times,
-// oldest first, without connection ids.
+// AdminsTTL is how long the admin set is kept between asks; an
+// admin_set.changed webhook replaces it at once.
+const AdminsTTL = time.Minute
+
+// adminCache is the service vault's admin set as last seen.
+type adminCache struct {
+	mu    sync.Mutex
+	set   map[string]bool
+	until time.Time
+	gen   uint64 // counts webhook updates
+}
+
+// setAdmins keeps an admin set. An answer to an ask (gen is the count
+// when it started) does not replace a webhook's newer set.
+func (s *Server) setAdmins(ids []string, fromHook bool, gen uint64) {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	s.admins.mu.Lock()
+	defer s.admins.mu.Unlock()
+	if fromHook {
+		s.admins.gen++
+	} else if gen != s.admins.gen {
+		return
+	}
+	s.admins.set, s.admins.until = set, s.now().Add(AdminsTTL)
+}
+
+// isAdmin reports whether a connection is in the admin set. When the
+// service vault cannot say, the answer is no.
+func (s *Server) isAdmin(ctx context.Context, connID string) bool {
+	s.admins.mu.Lock()
+	if s.admins.set != nil && s.now().Before(s.admins.until) {
+		ok := s.admins.set[connID]
+		s.admins.mu.Unlock()
+		return ok
+	}
+	gen := s.admins.gen
+	s.admins.mu.Unlock()
+	a, err := s.Vault.Admins(ctx)
+	if err != nil {
+		s.log().Warn("admins", "err", errName(err))
+		return false
+	}
+	s.setAdmins(a.Admins, false, gen)
+	return slices.Contains(a.Admins, connID)
+}
+
+// members answers a signed-in member with the roster's size; an admin
+// also gets the names and join times, oldest first. No connection ids.
 func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, _, ok, err := s.Member(ctx, r); err != nil {
+	conn, _, ok, err := s.Member(ctx, r)
+	if err != nil {
 		s.fail(w, "store", err)
 		return
 	} else if !ok {
@@ -247,6 +299,10 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 	items, err := s.Store.List(ctx, kindMember)
 	if err != nil {
 		s.fail(w, "store", err)
+		return
+	}
+	if !s.isAdmin(ctx, conn) {
+		writeJSON(w, http.StatusOK, map[string]any{"count": len(items)})
 		return
 	}
 	type entry struct {
@@ -262,5 +318,5 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 		out = append(out, entry{Name: m.Name, Joined: m.Joined.UTC()})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Joined.Before(out[j].Joined) })
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "members": out})
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(items), "members": out})
 }

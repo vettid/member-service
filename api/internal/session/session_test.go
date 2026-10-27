@@ -53,6 +53,9 @@ type vault struct {
 	now      func() time.Time
 	signins  map[string]*servicevault.SignInStatus
 	starts   []servicevault.SignInRequest
+	admins   []string
+	adminErr error
+	adminAsk int
 }
 
 func (v *vault) CreateInvite(_ context.Context, email string, ev servicevault.EmailVerification) (*servicevault.Invite, error) {

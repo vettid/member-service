@@ -86,6 +86,7 @@ type Vault interface {
 	InviteStatus(ctx context.Context, id string) (*servicevault.InviteStatus, error)
 	StartSignIn(ctx context.Context, req servicevault.SignInRequest) (*servicevault.SignIn, error)
 	SignInStatus(ctx context.Context, id string) (*servicevault.SignInStatus, error)
+	Admins(ctx context.Context) (*servicevault.Admins, error)
 }
 
 // Server serves the member API's session routes.
@@ -112,6 +113,8 @@ type Server struct {
 	// (MEMBER-SERVICE-PLAN §9); counters that must hold across tasks
 	// (attempts, limits) are the store's atomic Incr.
 	locks [256]sync.Mutex
+
+	admins adminCache
 }
 
 // lock returns the stripe of a flow key (hex).
@@ -685,7 +688,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "signed_out")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"connection_id": conn, "name": m.Name, "joined": m.Joined})
+	writeJSON(w, http.StatusOK, map[string]any{"connection_id": conn, "name": m.Name, "joined": m.Joined, "admin": s.isAdmin(r.Context(), conn)})
 }
 
 func (s *Server) signOut(w http.ResponseWriter, r *http.Request) {
@@ -758,6 +761,9 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) {
 			f.Stage, f.ConnID, f.KeyChanged = signInApproved, h.ConnectionID, ev.KeyChanged
 		})
+	case *servicevault.AdminSetChanged:
+		s.setAdmins(ev.Admins, true, 0)
+		return nil
 	case *servicevault.SignInDenied:
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInDenied })
 	case *servicevault.SignInExpired:

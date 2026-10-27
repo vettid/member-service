@@ -1,6 +1,6 @@
 # vettid.org Member Service & Service Vault — Plan
 
-**Version:** 0.6.1 (draft)
+**Version:** 0.6.2 (draft)
 **Status:** Planning — Phase 1 targeted before 2026-11-15
 **Owner:** Al Liebl
 **Repos:** `vettid/service-vault` (new; replaces the retired `vettid/vettid-service-vault`), `vettid/member-service` (new), `vettid/vettid-vault` (member vault: service connections, contracts, votes), `vettid/vettid-relay` (`relayclient`), `vettid/vettid.org` (specs), `vettid/vettid-android`, `vettid/vettid-ios`
@@ -142,7 +142,7 @@ Adds: may approve governance actions as one of n admins. Issued only to the admi
 
 ## 6. Member service features
 
-- **Membership:** roster = connections (later: connections with an active member contract). Everyone is provisional during the beta. Paid status needs payments (not yet built) and a service-callable status route on the member API (does not exist; `GET /api/account/me` is member-session only) — both later.
+- **Membership:** roster = connections (later: connections with an active member contract). Everyone is provisional during the beta. Members see only the roster's size; admins also see names and join dates (owner decision 2026-10-27). Paid status needs payments (not yet built) and a service-callable status route on the member API (does not exist; `GET /api/account/me` is member-session only) — both later.
 - **Proposals and voting:** proposal = title, body, options, record date, open/close (window ≤ 7 days), quorum rule, binding flag; signed by the service vault; secret ballot per §8; no vote changes before close (decided); threaded comments, members only. Binding votes must match the LLC operating agreement — counsel review before the first binding vote.
 - **Beta program:** cohorts invited in waves; assignments as task cards with signed completions and optional structured feedback; bugs route to a GitHub issue template; admin dashboard of completion and activity derived from signed completions.
 - **Notifications:** delivered as feed events from the member's vault; categories map onto existing feed kinds and priorities (`urgent` exists). A notification/sound spec for service events is to be written — NOTIFICATION-SOUND-SPEC.md does not exist yet.
@@ -370,6 +370,7 @@ Decided and closed: service vault model; no enclave; service vault rebuilt from 
 
 ## Changelog
 
+- **0.6.2** — Roster visibility (owner decision 2026-10-27): members see the member count; admins also see names and join dates (§6).
 - **0.6.1** — Sign-in challenge `exp` five minutes, not two (owner decision 2026-10-27): on the first staging run, two sign-ins expired while the member found the request on the phone and entered the credential password. VAULT-MESSAGING §10.4 allows up to ten (§4.2, 1.4).
 - **0.6.0** — Rebased on the state of the code on 2026-10-26. Service vault rebuilt from scratch as a VMS v2 peer in a new `service-vault` repo; prototype retired. Member-vault work added (service connections, contracts, completions, votes) and VAULT-MESSAGING scope lifted. Email captured on the site, stored as HMAC. Sign-in and interim admin approvals over `connauth`. Services reach phones through the member's vault. Ballot: vote root across credential rotation, `SHA256(proposal_id)` salt, RFC 9474 via circl, timestamp reduction in the ballot box, 409 rule, pool as static file, ≤ 7-day window, operator-metadata boundary. Contracts become Phase 3; total ~16–18 weeks.
 - **0.5.2** — `relay-go` dropped: `vettid-relay/relayclient` is the shared Go client. Ballot deposits redesigned on the existing protocol's one-shot open tokens (§5.6) — public pool plus ephemeral sender key — so no relay protocol change is needed (§7.1, §8, 4.1). Phase 1 shortened; total ~8–9 weeks. One open question remains.
