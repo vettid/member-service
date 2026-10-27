@@ -277,6 +277,18 @@ describe('alarms', () => {
     }
   });
 
+  test('down: no running task for 10 minutes', () => {
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'vettid-member-service-test-down',
+      MetricName: 'CPUUtilization',
+      Namespace: 'AWS/ECS',
+      Statistic: 'SampleCount',
+      ComparisonOperator: 'LessThanThreshold',
+      TreatMissingData: 'breaching',
+    });
+    expect(Object.keys(t.findResources('AWS::CloudWatch::Alarm'))).toHaveLength(Object.keys(ALARMS).length + 1);
+  });
+
   test('every alarm notifies the topic', () => {
     for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) {
       expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);

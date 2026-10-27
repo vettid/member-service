@@ -137,9 +137,12 @@ What the stack makes:
   - the origin-verify secret.
 
   The webhook secret and the TLS pin come from the service vault's stack.
-- **Alarms:** one per log line the member API marks with `alarm`:
+- **Alarms:** one per log line the member API marks with `alarm`, and one for the service being down:
   - `verify_failed`: wrong codes reached the hourly alarm level;
   - `key_changed`: a sign-in was approved with a changed credential key.
+  - `down`: no member API task has run for 10 minutes. It watches the
+    ECS service's CPU samples, which ECS reports without Container
+    Insights.
 
   They always notify someone. The stack requires either an SNS topic
   (`alarmTopicArn`) or an address (`alarmEmail`), and won't synth
