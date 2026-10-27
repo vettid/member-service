@@ -413,6 +413,18 @@ export class MemberServiceStack extends cdk.Stack {
       });
       alarm.addAlarmAction(new cwactions.SnsAction(topic));
     }
+    // Down: ECS reports the service's CPU every minute while a task runs
+    // (without Container Insights too); no data for 10 minutes means no
+    // task (a Spot reclamation is replaced in a minute or two).
+    new cloudwatch.Alarm(this, 'Alarm-down', {
+      alarmName: `${prefix}-down`,
+      alarmDescription: 'No member API task has run for 10 minutes: the site cannot connect, sign in or show the roster',
+      metric: this.service.metricCpuUtilization({ statistic: 'SampleCount', period: cdk.Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    }).addAlarmAction(new cwactions.SnsAction(topic));
 
     // ---- Outputs --------------------------------------------------------------
     const out = (id: string, value: string, description: string) => new cdk.CfnOutput(this, id, { value, description });
