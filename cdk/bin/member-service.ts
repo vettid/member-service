@@ -4,7 +4,7 @@ import { MemberServiceStack } from '../lib/member-service-stack';
 
 // Parameters come from context (cdk.json, ~/.cdk.json or -c key=value):
 //   envName (default prod), image (required, by digest), hostName,
-//   hostedZoneId, zoneName, mailFrom (required), serviceVaultExports,
+//   hostedZoneId, zoneName, mailFrom (required), serviceVaultParams,
 //   alarmTopicArn. See README "Deployment".
 const app = new cdk.App();
 const ctx = (key: string): string | undefined => {
@@ -25,7 +25,7 @@ const stack = new MemberServiceStack(app, `MemberService-${envName}`, {
   hostedZoneId: required('hostedZoneId'),
   zoneName: required('zoneName'),
   mailFrom: required('mailFrom'),
-  serviceVaultExports: ctx('serviceVaultExports'),
+  serviceVaultParams: ctx('serviceVaultParams'),
   alarmTopicArn: ctx('alarmTopicArn'),
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1' },
   description: `VettID member service (${envName})`,

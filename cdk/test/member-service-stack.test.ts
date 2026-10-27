@@ -20,7 +20,17 @@ const synth = (props: Partial<MemberServiceStackProps> = {}) => {
 };
 const t = synth();
 const json = (x: unknown) => JSON.stringify(x);
-const imported = (name: string) => ({ 'Fn::ImportValue': `ServiceVault-test-${name}` });
+const PARAMS: Record<string, string> = {
+  PublicSubnetIds: 'public-subnet-ids', VpcId: 'vpc-id', SecurityGroupId: 'security-group-id', NamespaceId: 'namespace-id',
+  ApiUrl: 'api-url', WebhookSecretArn: 'webhook-secret-arn',
+};
+/** The reference to a service vault value: a deploy-time SSM parameter, never an import. */
+const imported = (name: string) => {
+  const path = `/vettid/service-vault/test/${PARAMS[name]}`;
+  const [id] = Object.entries<any>(t.toJSON().Parameters).find(([, p]) => p.Default === path) ?? [];
+  if (!id) throw new Error(`no parameter for ${path}`);
+  return { Ref: id };
+};
 
 const container = () => {
   const td = Object.values<any>(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties;
@@ -35,6 +45,15 @@ const taskRoleStatements = (): any[] => {
     .flatMap((p) => p.Properties.PolicyDocument.Statement);
 };
 
+describe('service vault values', () => {
+  test('read from SSM at deploy time; nothing imported, so the service vault stack stays free to change', () => {
+    expect(json(t.toJSON())).not.toContain('Fn::ImportValue');
+    for (const p of Object.values<any>(t.toJSON().Parameters).filter((p) => String(p.Default).startsWith('/vettid/service-vault/'))) {
+      expect(p.Type).toBe('AWS::SSM::Parameter::Value<String>');
+    }
+  });
+});
+
 describe('network', () => {
   test('in the service vault VPC: no VPC, NAT gateway or load balancer of its own', () => {
     t.resourceCountIs('AWS::EC2::VPC', 0);
@@ -42,7 +61,7 @@ describe('network', () => {
     t.resourceCountIs('AWS::ElasticLoadBalancingV2::LoadBalancer', 0);
     const link = Object.values<any>(t.findResources('AWS::ApiGatewayV2::VpcLink'))[0].Properties;
     expect(link.SubnetIds).toHaveLength(2);
-    for (const id of link.SubnetIds) expect(json(id)).toContain('ServiceVault-test-PublicSubnetIds');
+    for (const id of link.SubnetIds) expect(json(id)).toContain(imported('PublicSubnetIds').Ref);
   });
 
   test('the task admits only the VPC link, on its port; nothing from the internet', () => {
@@ -145,7 +164,7 @@ describe('task', () => {
     const secrets = Object.fromEntries(c.Secrets.map((s: any) => [s.Name, s.ValueFrom]));
     expect(Object.keys(secrets).sort()).toEqual(['MEMBER_API_PEPPER', 'ORIGIN_VERIFY_SECRET', 'SERVICE_VAULT_API_KEY', 'SERVICE_VAULT_PIN', 'WEBHOOK_SECRET']);
     expect(secrets.WEBHOOK_SECRET).toEqual(imported('WebhookSecretArn'));
-    expect(json(secrets.SERVICE_VAULT_PIN)).toContain('ServiceVault-test-TlsPinParameterName');
+    expect(json(secrets.SERVICE_VAULT_PIN)).toContain(':parameter/vettid/service-vault/test/tls-pin');
     for (const name of Object.keys(secrets)) expect(env[name]).toBeUndefined();
   });
 
@@ -185,7 +204,7 @@ describe('task', () => {
     expect(smResources).toContainEqual(imported('WebhookSecretArn'));
     const ssmSt = st.filter((s) => [s.Action].flat().some((a: string) => a.startsWith('ssm:')));
     expect(ssmSt).toHaveLength(1);
-    expect(json(ssmSt[0].Resource)).toContain('ServiceVault-test-TlsPinParameterName');
+    expect(json(ssmSt[0].Resource)).toContain(':parameter/vettid/service-vault/test/tls-pin');
     for (const s of st) expect([s.Resource].flat()).not.toContain('*');
   });
 

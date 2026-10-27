@@ -54,7 +54,7 @@ export const ALARMS = {
 } as const;
 
 export interface MemberServiceStackProps extends cdk.StackProps {
-  /** Environment name (e.g. `prod`, `staging`): part of every resource name, and the service vault stack's (`ServiceVault-<env>`). */
+  /** Environment name (e.g. `prod`, `staging`): part of every resource name, and of the service vault's SSM path. */
   readonly envName: string;
   /** Container image pinned by digest, never by tag (ECR or GHCR). */
   readonly image: string;
@@ -65,8 +65,13 @@ export interface MemberServiceStackProps extends cdk.StackProps {
   readonly zoneName: string;
   /** SES sender of a verified domain identity (MAIL_FROM), e.g. no-reply@staging.vettid.org. */
   readonly mailFrom: string;
-  /** The service vault stack's export prefix (default `ServiceVault-<envName>`). */
-  readonly serviceVaultExports?: string;
+  /**
+   * Where the service vault stack publishes its values in SSM (default
+   * `/vettid/service-vault/<envName>`, service-vault cdk ssmPrefix). They
+   * are read at deploy time, which never locks that stack's values, as a
+   * CloudFormation import would.
+   */
+  readonly serviceVaultParams?: string;
   /** SNS topic the alarms notify (none: the alarms are only on the console). */
   readonly alarmTopicArn?: string;
 }
@@ -120,12 +125,16 @@ export class MemberServiceStack extends cdk.Stack {
       throw new Error(`the stack must be in us-east-1 (got ${this.region})`);
     }
     const prefix = `vettid-member-service-${envName}`;
-    const sv = (name: string) => cdk.Fn.importValue(`${props.serviceVaultExports ?? `ServiceVault-${envName}`}-${name}`);
+    const svPrefix = props.serviceVaultParams ?? `/vettid/service-vault/${envName}`;
+    if (!/^\/[A-Za-z0-9_.\/-]+[^/]$/.test(svPrefix)) {
+      throw new Error(`serviceVaultParams must be an SSM path such as /vettid/service-vault/staging (got "${svPrefix}")`);
+    }
+    const sv = (name: string) => ssm.StringParameter.valueForStringParameter(this, `${svPrefix}/${name}`);
 
     // ---- The service vault's network --------------------------------------
-    const subnetIds = cdk.Fn.split(',', sv('PublicSubnetIds'), 2);
+    const subnetIds = cdk.Fn.split(',', sv('public-subnet-ids'), 2);
     const vpc = ec2.Vpc.fromVpcAttributes(this, 'Vpc', {
-      vpcId: sv('VpcId'),
+      vpcId: sv('vpc-id'),
       // Only labels on the imported subnets: no lookup at synth.
       availabilityZones: [cdk.Fn.select(0, cdk.Fn.getAzs()), cdk.Fn.select(1, cdk.Fn.getAzs())],
       publicSubnetIds: [cdk.Fn.select(0, subnetIds), cdk.Fn.select(1, subnetIds)],
@@ -133,9 +142,9 @@ export class MemberServiceStack extends cdk.Stack {
     // Nothing here reads the imported subnets' route tables.
     for (const subnet of vpc.publicSubnets) cdk.Annotations.of(subnet).acknowledgeWarning('@aws-cdk/aws-ec2:noSubnetRouteTableId');
     const namespace = servicediscovery.PrivateDnsNamespace.fromPrivateDnsNamespaceAttributes(this, 'Namespace', {
-      namespaceId: sv('NamespaceId'),
-      namespaceArn: sv('NamespaceArn'),
-      namespaceName: sv('NamespaceName'),
+      namespaceId: sv('namespace-id'),
+      namespaceArn: sv('namespace-arn'),
+      namespaceName: sv('namespace-name'),
     });
 
     // The VPC link's interfaces may reach the task on its port, and only
@@ -154,7 +163,7 @@ export class MemberServiceStack extends cdk.Stack {
     linkSg.addEgressRule(this.securityGroup, ec2.Port.tcp(API_PORT), 'to the member API');
     this.securityGroup.addIngressRule(linkSg, ec2.Port.tcp(API_PORT), 'from the VPC link');
     this.securityGroup.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'HTTPS out');
-    const serviceVaultSg = sv('SecurityGroupId');
+    const serviceVaultSg = sv('security-group-id');
     new ec2.CfnSecurityGroupEgress(this, 'ToServiceVault', {
       groupId: this.securityGroup.securityGroupId,
       ipProtocol: 'tcp',
@@ -163,8 +172,8 @@ export class MemberServiceStack extends cdk.Stack {
       destinationSecurityGroupId: serviceVaultSg,
       description: 'the service vault private API',
     });
-    // The service vault's export says to add this rule on its group: the
-    // member API is the client its private API admits.
+    // The service vault's stack leaves this rule to its client: the member
+    // API is the client its private API admits.
     new ec2.CfnSecurityGroupIngress(this, 'ServiceVaultFromApi', {
       groupId: serviceVaultSg,
       ipProtocol: 'tcp',
@@ -211,8 +220,8 @@ export class MemberServiceStack extends cdk.Stack {
       description: `Header value CloudFront adds to /api/* requests (${ORIGIN_HEADER}); the member API refuses requests without it`,
       generateSecretString: { passwordLength: 48, excludePunctuation: true, includeSpace: false },
     });
-    const webhookSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'WebhookSecret', sv('WebhookSecretArn'));
-    const tlsPin = ssm.StringParameter.fromStringParameterAttributes(this, 'TlsPin', { parameterName: sv('TlsPinParameterName'), simpleName: false });
+    const webhookSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'WebhookSecret', sv('webhook-secret-arn'));
+    const tlsPin = ssm.StringParameter.fromStringParameterAttributes(this, 'TlsPin', { parameterName: `${svPrefix}/tls-pin`, simpleName: false });
 
     // ---- Compute ------------------------------------------------------------
     const cluster = new ecs.Cluster(this, 'Cluster', {
@@ -263,7 +272,7 @@ export class MemberServiceStack extends cdk.Stack {
       readonlyRootFilesystem: true,
       environment: {
         MEMBER_API_ADDR: `:${API_PORT}`,
-        SERVICE_VAULT_URL: sv('ApiUrl'),
+        SERVICE_VAULT_URL: sv('api-url'),
         DYNAMODB_TABLE: this.table.tableName,
         MAIL_FROM: props.mailFrom,
         CLIENT_IP_HEADER,

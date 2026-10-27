@@ -104,8 +104,11 @@ From the environment (see `.env.example`):
 ## Deployment
 
 One CDK stack, `MemberService-<env>` (`cdk/`), in us-east-1 and in the
-same account as the service vault's stack `ServiceVault-<env>`. It takes
-that stack's exports. Nothing is deployed from CI. CI publishes the image
+same account as the service vault's stack `ServiceVault-<env>`. It reads
+that stack's values from the SSM parameters it publishes
+(`/vettid/service-vault/<env>/…`). They are read at deploy time, not
+imported, so the service vault's stack stays free to change them. After
+such a change, deploy this stack again. Nothing is deployed from CI. CI publishes the image
 to GHCR from `main`, and a deployment pins its digest.
 
 What the stack makes:
@@ -144,18 +147,19 @@ Context (`-c key=value`):
 
 | Key | Required | |
 |---|---|---|
-| `envName` | no (`prod`) | Part of every name, and the service vault stack's (`ServiceVault-<env>`) |
+| `envName` | no (`prod`) | Part of every name, and of the service vault's parameter path |
 | `image` | yes | `ghcr.io/vettid/member-service@sha256:<digest>`, never a tag |
 | `hostName` | yes | e.g. `member.staging.vettid.org` |
 | `hostedZoneId`, `zoneName` | yes | The zone the host is in. For staging that's `staging.vettid.org`, whose id vettid.org publishes in SSM at `/vettid-org/staging/dns/zone-id` |
 | `mailFrom` | yes | A sender of a verified SES domain identity, e.g. `no-reply@staging.vettid.org` |
-| `serviceVaultExports` | no | The service vault stack's export prefix, if not `ServiceVault-<env>` |
+| `serviceVaultParams` | no | The service vault's SSM path, if not `/vettid/service-vault/<env>` |
 | `alarmTopicArn` | no | An SNS topic for the alarms |
 
 First deployment:
 
-1. The service vault: `ServiceVault-<env>` is deployed and its task has
-   started at least once. Only then does its TLS pin parameter hold a pin:
+1. The service vault: `ServiceVault-<env>` is deployed from a
+   service-vault `main` that publishes its SSM parameters (since
+   service-vault #29), and its task has started at least once. Only then does its TLS pin parameter hold a pin:
    `aws ssm get-parameter --name /vettid/service-vault/<env>/tls-pin`
    must answer `sha256/…`, not `unset`. With `unset`, the member API exits
    at start and the stack's create rolls back.
