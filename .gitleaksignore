@@ -1,0 +1,5 @@
+# Placeholders in .env.example ("replace-me-with-at-least-32-bytes") that
+# gitleaks' generic-api-key rule matched in this commit; they are not
+# secrets, and the file now uses REPLACE_ME.
+3a1d6f259f2107ceb29e7f2cefb9e9d28bcb6b05:.env.example:generic-api-key:17
+3a1d6f259f2107ceb29e7f2cefb9e9d28bcb6b05:.env.example:generic-api-key:20

@@ -71,7 +71,10 @@ func TestDynamo(t *testing.T) {
 	if err := s.Put(ctx, "k", "a", []byte("3"), time.Time{}, true); err != nil {
 		t.Fatalf("ifAbsent over an expired record: %v", err)
 	}
-	_ = s.Put(ctx, "k", "b", nil, time.Time{}, false)
+	// An empty record (the webhook replay cache's).
+	if err := s.Put(ctx, "k", "b", nil, time.Time{}, true); err != nil {
+		t.Fatalf("empty record: %v", err)
+	}
 	if items, err := s.List(ctx, "k"); err != nil || len(items) != 2 || items[0].ID != "a" || string(items[0].Data) != "3" {
 		t.Fatalf("list %+v %v", items, err)
 	}

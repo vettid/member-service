@@ -77,7 +77,9 @@ func (s *Dynamo) Get(ctx context.Context, kind, id string) ([]byte, bool, error)
 // Put implements Store.
 func (s *Dynamo) Put(ctx context.Context, kind, id string, d []byte, exp time.Time, ifAbsent bool) error {
 	item := key(kind, id)
-	item["d"] = &types.AttributeValueMemberB{Value: d}
+	if len(d) > 0 { // an empty binary is refused; absent reads as empty
+		item["d"] = &types.AttributeValueMemberB{Value: d}
+	}
 	if !exp.IsZero() {
 		item["exp"] = epoch(exp)
 	}
