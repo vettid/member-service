@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.11
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.1
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.79.3
-	github.com/vettid/service-vault v0.0.0-20261027161345-fb94ca598f41
+	github.com/vettid/service-vault v0.0.0-20261027233235-1f62c1978d55
 )
 
 require (
