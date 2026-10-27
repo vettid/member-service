@@ -52,8 +52,63 @@ test('connect: email, code, invitation, SAS, connected', async () => {
   await c.tick(); // sas
   assert.ok(visible(page, 'step-sas'));
   assert.equal(page.get('sas').textContent, '4821');
+  assert.equal(c.pending(), 1, 'one poll');
   await c.tick(); // connected
   assert.equal(page.replaced, '/home/');
+  assert.equal(c.pending(), 0, 'the poll stopped');
+});
+
+test('connect: a resume that cannot reach the API says so, retries, and picks up at the SAS', async () => {
+  const page = load(web + 'connect/index.html');
+  const c = clock();
+  api({
+    'GET /api/connect/status': [
+      [0],
+      [503, { error: 'unavailable' }],
+      [200, { status: 'sas', sas: '4821', expires_at: '2026-10-27T12:10:00Z' }],
+      [200, { status: 'declined' }],
+    ],
+  });
+  await run('connect.js');
+  assert.ok(page.get('step-email').hidden, 'not sent back to step 1');
+  assert.match(page.get('errors').textContent, /could not reach/);
+  await c.tick(); // 503: the same outage, reported once
+  assert.match(page.get('errors').textContent, /could not reach/);
+  await c.tick(); // sas
+  assert.ok(visible(page, 'step-sas'));
+  assert.equal(page.get('errors').textContent, '', 'cleared once the API answers');
+  assert.equal(c.pending(), 1);
+  await c.tick(); // declined, by poll
+  assert.ok(visible(page, 'step-end'));
+  assert.match(page.get('end-title').textContent, /declined/);
+  assert.equal(c.pending(), 0);
+});
+
+test('connect: polling gives up after the invitation, and a restart stops it', async () => {
+  let page = load(web + 'connect/index.html');
+  let c = clock();
+  api({ 'GET /api/connect/status': [[200, { status: 'waiting', url: 'https://vettid.org/i/abc', expires_at: '2026-10-27T12:10:00Z' }], [0]] });
+  await run('connect.js');
+  assert.ok(visible(page, 'step-invite'));
+  await c.tick();
+  c.advance(12 * 60_000);
+  await c.tick();
+  assert.match(page.get('errors').textContent, /Reload the page/);
+  assert.equal(c.pending(), 0);
+
+  page = load(web + 'connect/index.html');
+  c = clock();
+  api({
+    'GET /api/connect/status': [[404, { error: 'no_flow' }], [200, { status: 'code' }]],
+    'POST /api/connect/start': [[202, { expires_at: '2026-10-27T12:10:00Z' }]],
+  });
+  await run('connect.js');
+  page.get('email').value = 'ada@example.org';
+  await page.get('email-form').dispatch('submit');
+  await page.get('restart').dispatch('click');
+  assert.ok(visible(page, 'step-email'));
+  assert.equal(page.get('email').value, 'ada@example.org', 'the address is kept for a new code');
+  assert.equal(c.pending(), 0);
 });
 
 test('connect: a reload at the code step asks for the address again', async () => {
@@ -114,6 +169,18 @@ test('sign-in: ended reads the same however it ended; a reload resumes', async (
   assert.ok(visible(page, 'step-end'));
 
   page = load(web + 'signin/index.html');
+  const c2 = clock();
+  api({ 'GET /api/signin/status': [[0], [200, { status: 'pending', match_code: '17', expires_at: '2026-10-27T12:06:00Z' }]] });
+  await run('signin.js');
+  assert.ok(page.get('step-email').hidden);
+  assert.match(page.get('errors').textContent, /could not reach/);
+  await c2.tick();
+  assert.ok(visible(page, 'step-wait'));
+  assert.equal(page.get('errors').textContent, '');
+  await page.get('cancel').dispatch('click');
+  assert.equal(c2.pending(), 0, 'starting over stops the poll');
+
+  page = load(web + 'signin/index.html');
   clock();
   api({ 'GET /api/signin/status': [[404, { error: 'no_flow' }]], 'POST /api/signin/start': [[429, { error: 'rate_limited' }]] });
   await run('signin.js');
@@ -155,12 +222,19 @@ test('home: a member sees the count, an admin the names', async () => {
   assert.equal(page.replaced, '/?signedout=1');
 });
 
-test('home: signed out goes to sign-in', async () => {
-  const page = load(web + 'home/index.html');
+test('home: signed out goes to sign-in, also when the session ends between calls', async () => {
+  let page = load(web + 'home/index.html');
   clock();
   api({ 'GET /api/me': [[401, { error: 'signed_out' }]] });
   await run('home.js');
   assert.equal(page.replaced, '/signin/');
+
+  page = load(web + 'home/index.html');
+  clock();
+  api({ 'GET /api/me': [[200, { connection_id: 'c1', name: 'Ada', joined: '2026-10-27T12:00:00Z' }]], 'GET /api/members': [[401, { error: 'signed_out' }]] });
+  await run('home.js');
+  assert.equal(page.replaced, '/signin/');
+  assert.equal(page.get('errors').textContent, '');
 });
 
 test('landing: a member goes home', async () => {

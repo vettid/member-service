@@ -3,7 +3,7 @@
 // code on a computer), then the member compares the SAS and approves on
 // the phone. GET /api/connect/status drives every step after the code.
 
-import { getOrNull, poll, post } from './api.js';
+import { poll, pollMessages, post } from './api.js';
 import { $, el, fill } from './dom.js';
 import { qrModules, qrSvg } from './qr.js';
 import * as ui from './ui.js';
@@ -15,7 +15,7 @@ const emailForm = $('email-form');
 const codeForm = $('code-form');
 let email = '';
 let stop = null;
-let reported = false;
+let until = null; // the invitation's expiry, for the poll
 
 function show(id) {
   for (const s of steps) s.hidden = s.id !== id;
@@ -42,6 +42,7 @@ function invite(url, expiresAt) {
     box.hidden = true;
   }
   const exp = new Date(expiresAt);
+  until = Number.isNaN(exp.getTime()) ? null : exp;
   $('invite-exp').textContent = Number.isNaN(exp.getTime())
     ? ''
     : `The invitation works until ${exp.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}.`;
@@ -67,6 +68,8 @@ function apply(st) {
     end('expired');
     return true;
   }
+  const exp = new Date(st.expires_at);
+  if (!Number.isNaN(exp.getTime())) until = exp;
   switch (st.status) {
     case 'code':
       return false;
@@ -88,11 +91,7 @@ function apply(st) {
 
 function watch() {
   stop?.();
-  reported = false;
-  stop = poll('/api/connect/status', apply, (err) => {
-    if (!reported) ui.showError(err);
-    reported = true;
-  });
+  stop = poll('/api/connect/status', apply, { ...pollMessages(ui), until });
 }
 
 emailForm.addEventListener('submit', async (e) => {
@@ -119,29 +118,26 @@ codeForm.addEventListener('submit', async (e) => {
   watch();
 });
 
+// Back to the first step, with the address filled in when the page
+// knows it, for a new code or a different address.
 function restart() {
   stop?.();
-  email = '';
   ui.clearMessages();
   emailForm.reset();
+  emailForm.elements.email.value = email;
+  email = '';
   show('step-email');
   emailForm.elements.email.focus();
 }
 $('restart').addEventListener('click', restart);
 $('again').addEventListener('click', restart);
 
-// Back on the page mid-flow? Pick it up where it was.
-getOrNull('/api/connect/status').then(
-  (st) => {
-    if (!st) {
-      show('step-email');
-      return;
-    }
-    if (st.status === 'code') {
-      codeStep();
-      return;
-    }
-    if (!apply(st)) watch();
-  },
-  () => show('step-email'),
-);
+// Back on the page mid-flow? Pick it up where it was. If the API can't
+// be reached, say so and keep asking rather than start over (the
+// invitation may still be open on the phone).
+stop = poll('/api/connect/status', (st) => {
+  if (!st) show('step-email');
+  else if (st.status === 'code') codeStep();
+  else if (!apply(st)) watch();
+  return true;
+}, { ...pollMessages(ui), now: true });

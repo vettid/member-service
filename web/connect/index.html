@@ -66,7 +66,7 @@
         </div>
         <div class="actions">
           <button type="submit" class="btn btn-primary">Continue</button>
-          <button type="button" class="link-btn" id="restart">Use a different email</button>
+          <button type="button" class="link-btn" id="restart">Get a new code or use a different email</button>
         </div>
       </form>
     </section>
@@ -80,10 +80,10 @@
       <div class="code-box pointer-only" id="invite-qr"></div>
       <p class="muted" id="invite-exp"></p>
     </section>
-    <section class="card" id="step-sas" aria-labelledby="sas-title" tabindex="-1" hidden>
+    <section class="card" id="step-sas" aria-labelledby="sas-title" aria-describedby="sas-box" tabindex="-1" hidden>
       <h2 id="sas-title">Check the code on your phone</h2>
       <p>Your phone shows a code for this connection. Approve it on the phone <strong>only if it matches</strong> the code here. If it doesn't match, decline: someone else may have opened your invitation.</p>
-      <div class="code-box">
+      <div class="code-box" id="sas-box">
         <span class="code-label">This connection's code</span>
         <span class="big-code" id="sas"></span>
       </div>

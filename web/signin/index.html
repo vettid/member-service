@@ -52,10 +52,10 @@
         </div>
       </form>
     </section>
-    <section class="card" id="step-wait" aria-labelledby="wait-title" tabindex="-1" hidden>
+    <section class="card" id="step-wait" aria-labelledby="wait-title" aria-describedby="match-box" tabindex="-1" hidden>
       <h2 id="wait-title">Approve on your phone</h2>
-      <p>If this address belongs to a member, the VettID app on their phone now has a sign-in request. Approve it <strong>only if it shows the same number</strong> as this page.</p>
-      <div class="code-box">
+      <p>If this address belongs to a member, the VettID app on their phone now has a sign-in request. Approve it <strong>only if it shows the same number</strong> as this page. If the number differs, or you didn't start this sign-in, deny it.</p>
+      <div class="code-box" id="match-box">
         <span class="code-label">Match code</span>
         <span class="big-code" id="match"></span>
       </div>
@@ -63,6 +63,7 @@
       <div class="actions">
         <button type="button" class="link-btn" id="cancel">Use a different email</button>
       </div>
+      <p class="muted">Starting over doesn't withdraw this request: it stays on the phone until it times out. Deny it there if you won't use it.</p>
     </section>
     <section class="card result" id="step-end" aria-labelledby="end-title" tabindex="-1" hidden>
       <h2 id="end-title">The sign-in didn't complete</h2>

@@ -1,7 +1,7 @@
 // Member home: who is signed in, the roster (its size for every member,
 // names for admins: plan §6), sign out.
 
-import { get, getOrNull, post } from './api.js';
+import { ApiError, get, getOrNull, post } from './api.js';
 import { $, date, el, fill } from './dom.js';
 import * as ui from './ui.js';
 
@@ -26,9 +26,21 @@ async function load() {
   }
 }
 
-load().catch((err) => ui.showError(err));
+// A session that ended meanwhile goes to sign-in, not to an error.
+function signedOut(err) {
+  if (err instanceof ApiError && err.status === 401) {
+    location.replace('/signin/');
+    return true;
+  }
+  return false;
+}
+
+load().catch((err) => signedOut(err) || ui.showError(err));
 
 $('signout').addEventListener('click', async () => {
-  const done = await ui.busy($('signout'), () => post('/api/signout'), { busyLabel: 'Signing out…' });
+  const done = await ui.busy($('signout'), () => post('/api/signout'), {
+    busyLabel: 'Signing out…',
+    onError: (err) => signedOut(err) || ui.showError(err),
+  });
   if (done !== undefined) location.replace('/?signedout=1');
 });

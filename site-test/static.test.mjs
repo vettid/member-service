@@ -33,9 +33,10 @@ test('HTML: no inline script, style or handlers; local references exist', () => 
     assert.doesNotMatch(s, /<style\b|\sstyle="/, `${where}: inline style`);
     assert.doesNotMatch(s, /\son[a-z]+="/, `${where}: inline handler`);
     assert.match(s, /<meta name="referrer" content="no-referrer">/, `${where}: referrer`);
-    for (const m of s.matchAll(/\s(?:src|href)="([^"]+)"/g)) {
-      const ref = m[1];
-      if (/^(https:\/\/vettid\.org|mailto:|#)/.test(ref)) continue;
+    for (const m of s.matchAll(/<(\w+)[^>]*\s(src|href)="([^"]+)"/g)) {
+      const [, tag, attr, ref] = m;
+      // Links may leave the site; anything the page loads may not.
+      if (tag === 'a' && attr === 'href' && /^(https:\/\/vettid\.org\/?|mailto:|#)/.test(ref)) continue;
       assert.ok(ref.startsWith('/'), `${where}: ${ref} is not same-origin`);
       if (ref.endsWith('/')) assert.ok(existsSync(join(web, ref, 'index.html')), `${where}: ${ref}`);
       else assert.ok(existsSync(join(web, ref)), `${where}: ${ref}`);

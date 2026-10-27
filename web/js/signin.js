@@ -3,7 +3,7 @@
 // (the session is set) or ended. The page reads the same whether or not
 // the address is a member's.
 
-import { getOrNull, poll, post } from './api.js';
+import { poll, pollMessages, post } from './api.js';
 import { $ } from './dom.js';
 import * as ui from './ui.js';
 
@@ -19,29 +19,22 @@ function show(id) {
   if (id !== 'step-email') shown.focus();
 }
 
-function wait(matchCode) {
+function wait(matchCode, expiresAt) {
   $('match').textContent = matchCode;
   show('step-wait');
   stop?.();
-  let reported = false;
+  const until = new Date(expiresAt);
   stop = poll('/api/signin/status', (st) => {
-    if (!st) {
-      show('step-end');
-      return true;
-    }
-    if (st.status === 'approved') {
+    if (st?.status === 'approved') {
       location.replace('/home/');
       return true;
     }
-    if (st.status === 'ended') {
+    if (!st || st.status === 'ended') {
       show('step-end');
       return true;
     }
     return false;
-  }, (err) => {
-    if (!reported) ui.showError(err);
-    reported = true;
-  });
+  }, { ...pollMessages(ui), until: Number.isNaN(until.getTime()) ? null : until });
 }
 
 form.addEventListener('submit', async (e) => {
@@ -49,7 +42,7 @@ form.addEventListener('submit', async (e) => {
   const email = form.elements.email.value.trim();
   if (!email) return;
   const res = await ui.busy(form, () => post('/api/signin/start', { email }), { busyLabel: 'Starting…' });
-  if (res) wait(res.match_code);
+  if (res) wait(res.match_code, res.expires_at);
 });
 
 function restart() {
@@ -61,12 +54,11 @@ function restart() {
 $('cancel').addEventListener('click', restart);
 $('again').addEventListener('click', restart);
 
-// Back on the page with a sign-in still open? Pick it up.
-getOrNull('/api/signin/status').then(
-  (st) => {
-    if (st?.status === 'pending') wait(st.match_code);
-    else if (st?.status === 'approved') location.replace('/home/');
-    else show('step-email');
-  },
-  () => show('step-email'),
-);
+// Back on the page with a sign-in still open? Pick it up. If the API
+// can't be reached, say so and keep asking rather than start over.
+stop = poll('/api/signin/status', (st) => {
+  if (st?.status === 'pending') wait(st.match_code, st.expires_at);
+  else if (st?.status === 'approved') location.replace('/home/');
+  else show('step-email');
+  return true;
+}, { ...pollMessages(ui), now: true });

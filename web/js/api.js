@@ -13,7 +13,7 @@ export class ApiError extends Error {
 
 const MESSAGES = {
   bad_email: 'That doesn’t look like an email address.',
-  invalid_code: 'That code didn’t work. Check the newest email and try again, or ask for a new code.',
+  invalid_code: 'That code didn’t work. Check the newest email and try again, or get a new code.',
   rate_limited: 'Too many attempts. Please wait a while and try again.',
   unavailable: 'The VettID service is busy right now. Please try again in a minute.',
   signed_out: 'You are not signed in.',
@@ -68,31 +68,59 @@ export async function getOrNull(path) {
 }
 
 /**
- * poll(path, onStatus) asks every `every` ms until onStatus returns true
- * (done). Network errors and 5xx keep polling; the page shows them once.
- * Returns a stop function.
+ * poll(path, onStatus, opts) asks for path until onStatus(status) returns
+ * true (done); status is null for a 404 or 401. Every `every` ms while
+ * the API answers; after an error it backs off (up to 30 s) and calls
+ * onError, once per outage, and onRecover when an answer comes back. Past
+ * `until` (a Date) and a minute's grace it stops and calls onGiveUp.
+ * `now` asks at once instead of after the first interval. Returns stop().
  */
-export function poll(path, onStatus, onError, every = 2000) {
+export function poll(path, onStatus, { every = 2000, now = false, until = null, onError, onRecover, onGiveUp } = {}) {
   let stopped = false;
   let timer = null;
+  let failing = false;
+  let wait = every;
   async function tick() {
+    timer = null;
     if (stopped) return;
+    if (until && Date.now() > until.getTime() + 60_000) {
+      stopped = true;
+      onGiveUp?.();
+      return;
+    }
     try {
       const st = await getOrNull(path);
       if (stopped) return;
+      if (failing) {
+        failing = false;
+        onRecover?.();
+      }
+      wait = every;
       if (onStatus(st)) {
         stopped = true;
         return;
       }
     } catch (err) {
       if (stopped) return;
-      onError?.(err);
+      if (!failing) onError?.(err);
+      failing = true;
+      wait = Math.min(wait * 2, 30_000);
     }
-    timer = setTimeout(tick, every);
+    if (!stopped) timer = setTimeout(tick, wait);
   }
-  timer = setTimeout(tick, every);
+  if (now) tick();
+  else timer = setTimeout(tick, every);
   return () => {
     stopped = true;
-    clearTimeout(timer);
+    if (timer !== null) clearTimeout(timer);
+  };
+}
+
+/** Errors shown while polling, cleared when the API answers again. */
+export function pollMessages(ui) {
+  return {
+    onError: (err) => ui.showError(err),
+    onRecover: () => ui.clearMessages(),
+    onGiveUp: () => ui.showError('We still can’t reach the member service. Reload the page to try again.'),
   };
 }

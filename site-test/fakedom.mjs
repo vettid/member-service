@@ -163,7 +163,7 @@ export function load(file, { search = '' } = {}) {
   return page;
 }
 
-/** Scripted fetch: routes['GET /api/x'] is a list of answers, used in turn (the last repeats). */
+/** Scripted fetch: routes['GET /api/x'] is a list of [status, body] answers, used in turn (the last repeats). */
 export function api(routes) {
   const calls = [];
   globalThis.fetch = async (path, init) => {
@@ -172,25 +172,38 @@ export function api(routes) {
     const list = routes[key];
     if (!list) throw new Error(`fakedom: no route ${key}`);
     const [status, body] = list.length > 1 ? list.shift() : list[0];
+    if (status === 0) throw new TypeError('network'); // status 0: the network failed
     return { ok: status >= 200 && status < 300, status, text: async () => (body === undefined ? '' : JSON.stringify(body)), headers: new Map() };
   };
   return calls;
 }
 
-/** Timers run by hand: tick() runs everything due now. */
-export function clock() {
-  const due = [];
+/**
+ * Timers and Date.now run by hand: tick() runs every timer due now;
+ * advance(ms) moves the clock. pending() counts live timers, so a test
+ * can see a poll that doubled up or kept running.
+ */
+export function clock(start = Date.parse('2026-10-27T12:00:00Z')) {
+  let now = start;
+  let next = 0;
+  const timers = new Map();
   globalThis.setTimeout = (fn) => {
-    due.push(fn);
-    return due.length;
+    timers.set(++next, fn);
+    return next;
   };
-  globalThis.clearTimeout = () => {};
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  Date.now = () => now;
   return {
     async tick() {
-      const now = due.splice(0);
-      for (const fn of now) await fn();
+      const due = [...timers.entries()];
+      timers.clear();
+      for (const [, fn] of due) await fn();
       await settle();
     },
+    advance(ms) {
+      now += ms;
+    },
+    pending: () => timers.size,
   };
 }
 
