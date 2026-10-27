@@ -13,6 +13,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { join } from 'node:path';
@@ -72,8 +73,15 @@ export interface MemberServiceStackProps extends cdk.StackProps {
    * CloudFormation import would.
    */
   readonly serviceVaultParams?: string;
-  /** SNS topic the alarms notify (none: the alarms are only on the console). */
+  /**
+   * Where the alarms go; one of the two is required, so that an alarm
+   * always reaches a person. An existing SNS topic (staging: vettid.org's
+   * vault alerts topic, /vettid-org/staging/vault/alerts-topic-arn), or an
+   * address for a topic of this stack's own (the subscription must be
+   * confirmed from the email AWS sends).
+   */
   readonly alarmTopicArn?: string;
+  readonly alarmEmail?: string;
 }
 
 /**
@@ -123,6 +131,15 @@ export class MemberServiceStack extends cdk.Stack {
       // The site's certificate is made in this stack, and CloudFront takes
       // certificates from us-east-1 only.
       throw new Error(`the stack must be in us-east-1 (got ${this.region})`);
+    }
+    if (!props.alarmTopicArn === !props.alarmEmail) {
+      throw new Error('set exactly one of alarmTopicArn and alarmEmail: the alarms must reach a person');
+    }
+    if (props.alarmTopicArn && !/^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+$/.test(props.alarmTopicArn)) {
+      throw new Error(`alarmTopicArn must be an SNS topic ARN (got "${props.alarmTopicArn}")`);
+    }
+    if (props.alarmEmail && !/^[^@\s]+@[a-z0-9.-]+\.[a-z]+$/.test(props.alarmEmail)) {
+      throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
     }
     const prefix = `vettid-member-service-${envName}`;
     const svPrefix = props.serviceVaultParams ?? `/vettid/service-vault/${envName}`;
@@ -369,7 +386,14 @@ export class MemberServiceStack extends cdk.Stack {
     });
 
     // ---- Alarms ---------------------------------------------------------------
-    const topic = props.alarmTopicArn ? sns.Topic.fromTopicArn(this, 'AlarmTopic', props.alarmTopicArn) : undefined;
+    let topic: sns.ITopic;
+    if (props.alarmTopicArn) {
+      topic = sns.Topic.fromTopicArn(this, 'AlarmTopic', props.alarmTopicArn);
+    } else {
+      const own = new sns.Topic(this, 'AlarmTopic', { displayName: `VettID member service alarms (${envName})` });
+      own.addSubscription(new subs.EmailSubscription(props.alarmEmail!));
+      topic = own;
+    }
     for (const [name, description] of Object.entries(ALARMS)) {
       const metric = new logs.MetricFilter(this, `Alarm-${name}`, {
         logGroup,
@@ -387,7 +411,7 @@ export class MemberServiceStack extends cdk.Stack {
         comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       });
-      if (topic) alarm.addAlarmAction(new cwactions.SnsAction(topic));
+      alarm.addAlarmAction(new cwactions.SnsAction(topic));
     }
 
     // ---- Outputs --------------------------------------------------------------
@@ -400,5 +424,6 @@ export class MemberServiceStack extends cdk.Stack {
     out('LogGroupName', logGroup.logGroupName, 'The member API\'s log group');
     out('ServiceName', this.service.serviceName, 'The ECS service (force a new deployment to restart the task)');
     out('ClusterName', cluster.clusterName, 'The ECS cluster');
+    out('AlarmTopicArn', topic.topicArn, 'Where the alarms go');
   }
 }

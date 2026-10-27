@@ -126,6 +126,7 @@ jobs:
           -c hostedZoneId=Z0000000000000000000
           -c zoneName=staging.example.org
           -c mailFrom=no-reply@staging.example.org
+          -c alarmTopicArn=arn:aws:sns:us-east-1:000000000000:alerts
           > /dev/null
 
   publish:

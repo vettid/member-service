@@ -12,6 +12,7 @@ const base: MemberServiceStackProps = {
   hostedZoneId: 'Z0000000000000000000',
   zoneName: 'test.vettid.org',
   mailFrom: 'no-reply@test.vettid.org',
+  alarmTopicArn: 'arn:aws:sns:us-east-1:123456789012:alerts',
   env: { account: '123456789012', region: 'us-east-1' },
 };
 const synth = (props: Partial<MemberServiceStackProps> = {}) => {
@@ -276,10 +277,19 @@ describe('alarms', () => {
     }
   });
 
-  test('with a topic the alarms notify it', () => {
-    const topic = 'arn:aws:sns:us-east-1:123456789012:alerts';
-    const alarms = Object.values<any>(synth({ alarmTopicArn: topic }).findResources('AWS::CloudWatch::Alarm'));
-    for (const a of alarms) expect(a.Properties.AlarmActions).toEqual([topic]);
+  test('every alarm notifies the topic', () => {
+    for (const a of Object.values<any>(t.findResources('AWS::CloudWatch::Alarm'))) {
+      expect(a.Properties.AlarmActions).toEqual([base.alarmTopicArn]);
+    }
+  });
+
+  test('with an address instead, a topic of its own with that subscription', () => {
+    const t2 = synth({ alarmTopicArn: undefined, alarmEmail: 'ops@example.org' });
+    t2.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'ops@example.org' });
+    const topicId = Object.keys(t2.findResources('AWS::SNS::Topic'))[0];
+    for (const a of Object.values<any>(t2.findResources('AWS::CloudWatch::Alarm'))) {
+      expect(a.Properties.AlarmActions).toEqual([{ Ref: topicId }]);
+    }
   });
 });
 
@@ -290,6 +300,9 @@ describe('validation', () => {
     ['a host outside the zone', { hostName: 'member.example.org' }],
     ['a bad sender', { mailFrom: 'nobody' }],
     ['another region', { env: { account: '123456789012', region: 'eu-west-1' } }],
+    ['no alarm destination', { alarmTopicArn: undefined }],
+    ['two alarm destinations', { alarmEmail: 'ops@example.org' }],
+    ['a bad topic', { alarmTopicArn: 'alerts' }],
   ])('refuses %s', (_name, props) => {
     expect(() => synth(props as Partial<MemberServiceStackProps>)).toThrow();
   });

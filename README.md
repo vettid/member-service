@@ -141,7 +141,9 @@ What the stack makes:
   - `verify_failed`: wrong codes reached the hourly alarm level;
   - `key_changed`: a sign-in was approved with a changed credential key.
 
-  With `alarmTopicArn` they notify that SNS topic.
+  They always notify someone. The stack requires either an SNS topic
+  (`alarmTopicArn`) or an address (`alarmEmail`), and won't synth
+  without one.
 
 Context (`-c key=value`):
 
@@ -153,7 +155,7 @@ Context (`-c key=value`):
 | `hostedZoneId`, `zoneName` | yes | The zone the host is in. For staging that's `staging.vettid.org`, whose id vettid.org publishes in SSM at `/vettid-org/staging/dns/zone-id` |
 | `mailFrom` | yes | A sender of a verified SES domain identity, e.g. `no-reply@staging.vettid.org` |
 | `serviceVaultParams` | no | The service vault's SSM path, if not `/vettid/service-vault/<env>` |
-| `alarmTopicArn` | no | An SNS topic for the alarms |
+| `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go. Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
 
 First deployment:
 
@@ -173,7 +175,7 @@ First deployment:
 4. SES: `mailFrom`'s domain must be a verified identity in the account.
    While the account is in the SES sandbox, codes reach only verified
    recipients.
-5. `cd cdk && npm ci && npx cdk deploy -c envName=staging -c image=… -c hostName=member.staging.vettid.org -c hostedZoneId=… -c zoneName=staging.vettid.org -c mailFrom=no-reply@staging.vettid.org`
+5. `cd cdk && npm ci && npx cdk deploy -c envName=staging -c image=… -c hostName=member.staging.vettid.org -c hostedZoneId=… -c zoneName=staging.vettid.org -c mailFrom=no-reply@staging.vettid.org -c alarmTopicArn=<the vault alerts topic>`
 6. Register the API key with the service vault:
    - Add the SHA-256 (hex) of the `ServiceVaultApiKeySecretArn` output's
      value to the service vault's `…/api-key-hashes` secret. The value is
