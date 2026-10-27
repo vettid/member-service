@@ -51,6 +51,8 @@ type vault struct {
 	polls    int
 	inviteNo int
 	now      func() time.Time
+	signins  map[string]*servicevault.SignInStatus
+	starts   []servicevault.SignInRequest
 }
 
 func (v *vault) CreateInvite(_ context.Context, email string, ev servicevault.EmailVerification) (*servicevault.Invite, error) {
@@ -87,7 +89,7 @@ type fixture struct {
 }
 
 func newFixture(t *testing.T) *fixture {
-	f := &fixture{t: t, mail: &mailbox{codes: map[string]string{}}, vault: &vault{status: map[string]*servicevault.InviteStatus{}},
+	f := &fixture{t: t, mail: &mailbox{codes: map[string]string{}}, vault: &vault{status: map[string]*servicevault.InviteStatus{}, signins: map[string]*servicevault.SignInStatus{}},
 		st: store.NewMem(), now: t0, jar: map[string]string{}, ip: "198.51.100.7"}
 	f.st.Now = func() time.Time { return f.now }
 	f.vault.now = f.st.Now

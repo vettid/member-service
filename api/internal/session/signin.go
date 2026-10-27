@@ -1,0 +1,238 @@
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sort"
+	"time"
+
+	"github.com/vettid/member-service/api/internal/mail"
+	"github.com/vettid/service-vault/sdk/go/servicevault"
+)
+
+// Sign-in (MEMBER-SERVICE-PLAN §4.2). The service vault looks the address
+// up, answers the same way whether or not it is known (and whether or not
+// one of its per-email or per-source limits was reached), and sends the
+// challenge with the match code to the member's vault. The member API
+// only shows the match code and waits for the outcome.
+const (
+	// SignInTTL is how long the browser waits: the challenge's five-minute
+	// exp (plan 0.6.1) and a minute for a late answer.
+	SignInTTL = 6 * time.Minute
+	// SignInsPerSource caps sign-ins from one client address (an IPv6 /64)
+	// per hour, before the service vault is asked. It is per source only,
+	// so it says nothing about an address.
+	SignInsPerSource = 30
+)
+
+// SignInCookie holds the browser's sign-in flow (HttpOnly, like the
+// others).
+const SignInCookie = "__Host-ms_signin"
+
+// Record kinds of sign-in.
+const (
+	kindSignIn   = "signin"    // flow id -> signIn
+	kindSignInID = "signin-id" // service vault sign-in id -> flow id
+)
+
+// Sign-in stages; the status answers with them.
+const (
+	signInPending  = "pending"
+	signInApproved = "approved"
+	signInDenied   = "denied"
+	signInExpired  = "expired"
+)
+
+type signIn struct {
+	ID         string    `json:"signin_id"`
+	MatchCode  string    `json:"match_code"`
+	Stage      string    `json:"stage"`
+	ConnID     string    `json:"connection_id,omitempty"`
+	KeyChanged bool      `json:"key_changed,omitempty"`
+	Polled     time.Time `json:"polled,omitempty"`
+	Exp        time.Time `json:"exp"`
+}
+
+// signInStart: {email}. 202 {match_code, expires_at} and a sign-in
+// cookie, the same for a known and an unknown address.
+func (s *Server) signInStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	addr := mail.Normalize(req.Email)
+	if !mail.Valid(addr) {
+		writeError(w, http.StatusBadRequest, "bad_email")
+		return
+	}
+	ctx := r.Context()
+	// The service vault's per-source limit gets a keyed hash of the
+	// source, not the address itself (64 hex characters).
+	src := s.mac("source", sourceKey(s.clientIP(r)))
+	if over, err := s.limited(ctx, "signin:source:"+src, SignInsPerSource, RateWindow); err != nil {
+		s.fail(w, "rate", err)
+		return
+	} else if over {
+		writeError(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	si, err := s.Vault.StartSignIn(ctx, servicevault.SignInRequest{Email: addr, Source: src})
+	if err != nil {
+		s.log().Warn("start sign-in", "err", errName(err))
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	id, err := token()
+	if err != nil {
+		s.fail(w, "token", err)
+		return
+	}
+	fk := tokenKey(id)
+	f := &signIn{ID: si.ID, MatchCode: si.MatchCode, Stage: signInPending, Exp: s.now().Add(SignInTTL)}
+	if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, true); err != nil {
+		s.fail(w, "store", err)
+		return
+	}
+	if err := s.Store.Put(ctx, kindSignInID, si.ID, []byte(fk), f.Exp, false); err != nil {
+		s.fail(w, "store", err)
+		return
+	}
+	setCookie(w, SignInCookie, id, SignInTTL)
+	writeJSON(w, http.StatusAccepted, map[string]any{"match_code": f.MatchCode, "expires_at": f.Exp.UTC()})
+}
+
+// signInStatus reports the sign-in: pending (show the match code),
+// approved (the session is set), denied or expired. It asks the service
+// vault itself at most every PollEvery, in case a webhook is late.
+func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id := cookie(r, SignInCookie)
+	if id == "" {
+		writeError(w, http.StatusNotFound, "no_flow")
+		return
+	}
+	fk := tokenKey(id)
+	mu := s.lock(fk)
+	mu.Lock()
+	defer mu.Unlock()
+	f := &signIn{}
+	if ok, err := s.getJSON(ctx, kindSignIn, fk, f); err != nil {
+		s.fail(w, "store", err)
+		return
+	} else if !ok {
+		setCookie(w, SignInCookie, "", 0)
+		writeError(w, http.StatusNotFound, "no_flow")
+		return
+	}
+	now := s.now()
+	if f.Stage == signInPending && now.Sub(f.Polled) >= PollEvery {
+		f.Polled = now
+		if st, err := s.Vault.SignInStatus(ctx, f.ID); err != nil {
+			s.log().Warn("sign-in status", "err", errName(err))
+		} else {
+			applySignInStatus(f, st)
+		}
+		if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
+			s.fail(w, "store", err)
+			return
+		}
+	}
+	end := func(status string) {
+		_ = s.Store.Delete(ctx, kindSignIn, fk)
+		_ = s.Store.Delete(ctx, kindSignInID, f.ID)
+		setCookie(w, SignInCookie, "", 0)
+		writeJSON(w, http.StatusOK, map[string]any{"status": status})
+	}
+	switch f.Stage {
+	case signInPending:
+		writeJSON(w, http.StatusOK, map[string]any{"status": signInPending, "match_code": f.MatchCode, "expires_at": f.Exp.UTC()})
+	case signInApproved:
+		if f.KeyChanged {
+			// Approved with a credential key the connection's pinned one
+			// does not reach (a reset or a new phone). Still a sign-in;
+			// logged for review.
+			s.log().Warn("sign-in with a changed key", "connection_id", f.ConnID)
+		}
+		if err := s.startSession(ctx, w, f.ConnID); errors.Is(err, errRemoved) {
+			end(signInExpired)
+			return
+		} else if err != nil {
+			s.fail(w, "session", err)
+			return
+		}
+		end(signInApproved)
+	default:
+		end(f.Stage)
+	}
+}
+
+func applySignInStatus(f *signIn, st *servicevault.SignInStatus) {
+	switch st.Status {
+	case servicevault.SignInStatusApproved:
+		if st.ConnectionID != "" {
+			f.Stage, f.ConnID = signInApproved, st.ConnectionID
+			f.KeyChanged = st.KeyChanged != nil && *st.KeyChanged
+		}
+	case servicevault.SignInStatusDenied:
+		f.Stage = signInDenied
+	case servicevault.SignInStatusExpired:
+		f.Stage = signInExpired
+	}
+}
+
+// updateSignIn applies change to the flow of a service vault sign-in,
+// if any, while it is pending: the first outcome stands.
+func (s *Server) updateSignIn(ctx context.Context, signInID string, change func(*signIn)) error {
+	fk, ok, err := s.Store.Get(ctx, kindSignInID, signInID)
+	if err != nil || !ok {
+		return err
+	}
+	mu := s.lock(string(fk))
+	mu.Lock()
+	defer mu.Unlock()
+	f := &signIn{}
+	found, err := s.getJSON(ctx, kindSignIn, string(fk), f)
+	if err != nil || !found || f.Stage != signInPending {
+		return err
+	}
+	change(f)
+	return s.putJSON(ctx, kindSignIn, string(fk), f, f.Exp, false)
+}
+
+// --- roster (§6) ---
+
+// members lists the roster to a signed-in member: names and join times,
+// oldest first, without connection ids.
+func (s *Server) members(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if _, _, ok, err := s.Member(ctx, r); err != nil {
+		s.fail(w, "store", err)
+		return
+	} else if !ok {
+		writeError(w, http.StatusUnauthorized, "signed_out")
+		return
+	}
+	items, err := s.Store.List(ctx, kindMember)
+	if err != nil {
+		s.fail(w, "store", err)
+		return
+	}
+	type entry struct {
+		Name   string    `json:"name"`
+		Joined time.Time `json:"joined"`
+	}
+	out := make([]entry, 0, len(items))
+	for _, it := range items {
+		var m Member
+		if json.Unmarshal(it.Data, &m) != nil {
+			continue
+		}
+		out = append(out, entry{Name: m.Name, Joined: m.Joined.UTC()})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Joined.Before(out[j].Joined) })
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(out), "members": out})
+}

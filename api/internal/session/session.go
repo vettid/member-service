@@ -84,6 +84,8 @@ const RemovedTTL = 30 * 24 * time.Hour
 type Vault interface {
 	CreateInvite(ctx context.Context, email string, v servicevault.EmailVerification) (*servicevault.Invite, error)
 	InviteStatus(ctx context.Context, id string) (*servicevault.InviteStatus, error)
+	StartSignIn(ctx context.Context, req servicevault.SignInRequest) (*servicevault.SignIn, error)
+	SignInStatus(ctx context.Context, id string) (*servicevault.SignInStatus, error)
 }
 
 // Server serves the member API's session routes.
@@ -191,7 +193,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/connect/start", s.connectStart)
 	mux.HandleFunc("POST /api/connect/verify", s.connectVerify)
 	mux.HandleFunc("GET /api/connect/status", s.connectStatus)
+	mux.HandleFunc("POST /api/signin/start", s.signInStart)
+	mux.HandleFunc("GET /api/signin/status", s.signInStatus)
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/members", s.members)
 	mux.HandleFunc("POST /api/signout", s.signOut)
 	if s.Webhook != nil {
 		mux.Handle("POST /api/webhooks/service-vault", s.Webhook.Handler(s.webhook))
@@ -705,6 +710,17 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 			return err
 		}
 		return s.Store.Delete(ctx, kindMember, h.ConnectionID)
+	case *servicevault.SignInApproved:
+		if h.ConnectionID == "" {
+			return nil
+		}
+		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) {
+			f.Stage, f.ConnID, f.KeyChanged = signInApproved, h.ConnectionID, ev.KeyChanged
+		})
+	case *servicevault.SignInDenied:
+		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInDenied })
+	case *servicevault.SignInExpired:
+		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInExpired })
 	}
 	return nil
 }
