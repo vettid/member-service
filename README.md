@@ -14,8 +14,8 @@ passwords, no magic links and no trackers.
 
 ## Status
 
-**Phase 2 in progress:** the member API connects members (row 2.2).
-Email sign-in, the roster, the site and the CDK follow. The plan, its
+**Phase 2 in progress:** the member API connects members, signs them in
+by email and lists the roster (row 2.2). The site and the CDK follow. The plan, its
 decisions and its phases are in
 [docs/MEMBER-SERVICE-PLAN.md](docs/MEMBER-SERVICE-PLAN.md).
 
@@ -40,7 +40,10 @@ A `POST` must have `Content-Type: application/json`.
 | `POST /api/connect/start` `{email}` | Emails a 6-digit one-time code and sets the flow cookie. Always `202 {expires_at}`, whether or not a code was sent. Rate limits: 3 codes per address per hour and 10 per day; 20 per client address per hour, where an IPv6 address counts as its /64. A source over its limit doesn't use up the address's codes. `bad_email` for something that is not an address |
 | `POST /api/connect/verify` `{email, code}` | A right code (10 minutes, 5 tries, counted atomically) for the flow's address asks the service vault for an invitation with `email_verified: true`. Returns `{url, expires_at}`: the button on mobile, the QR code on desktop. Every refusal is `invalid_code`. A client address (an IPv6 /64) with 30 wrong codes in an hour is refused until the hour ends; only that source is held up. 200 wrong codes in an hour across all sources log an ERROR for an alarm, but block nobody |
 | `GET /api/connect/status` | `{status}`: `code`, `waiting` (with `url`), `sas` (with `sas`, to compare on the phone), `connected` (the session cookie is set), `declined` or `expired` |
-| `GET /api/me` | `{connection_id, name, joined}`, or `401 signed_out` |
+| `POST /api/signin/start` `{email}` | Asks the service vault to send a sign-in challenge to the member's vault. Returns `202 {match_code, expires_at}` and sets the sign-in cookie. The answer is the same whether or not the address belongs to a member: the service vault answers alike either way and applies its own limits per address and per source. Its source is a keyed hash of the client address (an IPv6 address counts as its /64), never the address itself. 30 sign-ins per client address per hour, then `429 rate_limited`. `bad_email` for something that is not an address |
+| `GET /api/signin/status` | `{status}`: `pending` (with `match_code`, for the member to compare on the phone), `approved` (the session cookie is set, and any earlier session of the browser ends) or `ended`. Denied and expired both read `ended`, so the answer never says whether an address is a member's: a member's vault can turn a challenge down without the member. The first outcome stands. An approval for a connection that has since been removed is `ended`. An approval with a changed credential key still signs in, and the API logs a warning |
+| `GET /api/me` | `{connection_id, name, joined, admin}`, or `401 signed_out` |
+| `GET /api/members` | For a signed-in member: `{count}`. An admin also gets `members: [{name, joined}]`, oldest first. Connection ids are never included. Admins are the service vault's admin set, which the API keeps for a minute and replaces as soon as an `admin_set.changed` webhook arrives. When the service vault can't say, the answer is the count only. `401 signed_out` without a session |
 | `POST /api/signout` | `204`, and the session ends |
 | `POST /api/webhooks/service-vault` | The service vault's signed webhooks (SDK `Receiver`, with its replay cache in DynamoDB) |
 | `GET /api/health` | `{status: "ok"}` |
