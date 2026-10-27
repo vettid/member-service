@@ -1,6 +1,6 @@
 # vettid.org Member Service & Service Vault — Plan
 
-**Version:** 0.6.0 (draft)
+**Version:** 0.6.1 (draft)
 **Status:** Planning — Phase 1 targeted before 2026-11-15
 **Owner:** Al Liebl
 **Repos:** `vettid/service-vault` (new; replaces the retired `vettid/vettid-service-vault`), `vettid/member-service` (new), `vettid/vettid-vault` (member vault: service connections, contracts, votes), `vettid/vettid-relay` (`relayclient`), `vettid/vettid.org` (specs), `vettid/vettid-android`, `vettid/vettid-ios`
@@ -102,11 +102,11 @@ The email is entered on the site, not disclosed by the vault: the member vault n
 
 1. Member enters their email on member.vettid.org. The site shows a two-digit match code and waits.
 2. Member service sends the email to the service vault, which computes the HMAC, resolves it to a connection — or not — and returns the same response after the same delay either way.
-3. If a connection exists, the service vault sends a `connection.authenticate.challenge` to the member's vault with `context` = "Sign in to vettid.org member service — match code NN" and an envelope `exp` of two minutes. The member's vault raises an approval on the phone.
+3. If a connection exists, the service vault sends a `connection.authenticate.challenge` to the member's vault with `context` = "Sign in to vettid.org member service — match code NN" and an envelope `exp` of five minutes. The member's vault raises an approval on the phone.
 4. Member confirms the code matches the browser and approves; the member's vault signs the challenge with the credential key.
 5. Service vault verifies and webhooks the member service, which issues a short-lived session.
 
-Controls: one pending request per member, two-minute TTL, per-email and per-source rate limits; denying on the phone invalidates the challenge; an unregistered email produces the same screen as a registered one; the member vault's ask gate (mute, cooldown, rate) applies. QR remains as a fallback for a member not receiving push. No passwords, no magic links.
+Controls: one pending request per member, five-minute TTL, per-email and per-source rate limits; denying on the phone invalidates the challenge; an unregistered email produces the same screen as a registered one; the member vault's ask gate (mute, cooldown, rate) applies. QR remains as a fallback for a member not receiving push. No passwords, no magic links.
 
 ### 4.3 Vote
 
@@ -289,7 +289,7 @@ Works against today's member vault: the service is an ordinary `connection`, sig
 | 1.1 | `internal/peer`: relay mailbox, suite-2 handshake, connection tokens, `connection.removed`, on vettid-vault `vms/*` + `relayclient` | service-vault | Completes a connection with a real member vault on staging |
 | 1.2 | Keystore (KMS envelope, persisted) and DynamoDB store; identity and pending challenges survive restart | service-vault | Restart keeps `service_id` and in-flight sign-ins |
 | 1.3 | Connect: invite API, acceptance webhook, email bound as HMAC + pepper | service-vault | A phone connects from a link or QR; webhook fires |
-| 1.4 | Sign-in: uniform-response lookup, rate limits, `connauth` challenge with match code in `context`, 2-minute `exp` | service-vault | Lookup-then-approve works end to end |
+| 1.4 | Sign-in: uniform-response lookup, rate limits, `connauth` challenge with match code in `context`, 5-minute `exp` | service-vault | Lookup-then-approve works end to end |
 | 1.5 | Webhooks (HMAC over timestamp.body), API keys, audit log | service-vault | Tests cover signing, replay and auth |
 | 1.6 | Admin approvals: action hash in `connauth` `context`, configurable m-of-n, audited | service-vault | 1-of-n enforced; threshold changes by config only |
 | 1.7 | Go SDK: invite, lookup, sign-in, approvals, webhook verify | service-vault | Member API can be written against it |
@@ -370,6 +370,7 @@ Decided and closed: service vault model; no enclave; service vault rebuilt from 
 
 ## Changelog
 
+- **0.6.1** — Sign-in challenge `exp` five minutes, not two (owner decision 2026-10-27): on the first staging run, two sign-ins expired while the member found the request on the phone and entered the credential password. VAULT-MESSAGING §10.4 allows up to ten (§4.2, 1.4).
 - **0.6.0** — Rebased on the state of the code on 2026-10-26. Service vault rebuilt from scratch as a VMS v2 peer in a new `service-vault` repo; prototype retired. Member-vault work added (service connections, contracts, completions, votes) and VAULT-MESSAGING scope lifted. Email captured on the site, stored as HMAC. Sign-in and interim admin approvals over `connauth`. Services reach phones through the member's vault. Ballot: vote root across credential rotation, `SHA256(proposal_id)` salt, RFC 9474 via circl, timestamp reduction in the ballot box, 409 rule, pool as static file, ≤ 7-day window, operator-metadata boundary. Contracts become Phase 3; total ~16–18 weeks.
 - **0.5.2** — `relay-go` dropped: `vettid-relay/relayclient` is the shared Go client. Ballot deposits redesigned on the existing protocol's one-shot open tokens (§5.6) — public pool plus ephemeral sender key — so no relay protocol change is needed (§7.1, §8, 4.1). Phase 1 shortened; total ~8–9 weeks. One open question remains.
 - **0.5.1** — Admin threshold 1-of-n for v1; relay ballot requirement stated.
