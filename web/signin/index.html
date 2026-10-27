@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b0b12" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f4f6" media="(prefers-color-scheme: light)">
+  <title>Sign in · VettID Member Service</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/png" href="/assets/favicon.png">
+  <script src="/js/theme-init.js"></script>
+  <link rel="stylesheet" href="/assets/fonts.css">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/member.css">
+  <script type="module" src="/js/theme.js"></script>
+  <script type="module" src="/js/signin.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="VettID Member Service home">
+      <img class="brand-logo brand-logo-dark" src="/assets/vettid-horizontal-transparent.svg" alt="" width="752" height="300">
+      <img class="brand-logo brand-logo-light" src="/assets/vettid-horizontal-transparent-on-light.svg" alt="" width="752" height="300">
+      <img class="brand-icon" src="/assets/favicon.svg" alt="" width="512" height="512">
+      <span class="brand-tag">Members</span>
+    </a>
+    <div class="header-tools">
+      <button type="button" class="theme-btn" id="theme-toggle" hidden></button>
+    </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div class="page-head">
+      <span class="eyebrow">Welcome back</span>
+      <h1>Sign in</h1>
+      <p>Enter your email address, then approve the request in the VettID app on your phone. No password needed.</p>
+    </div>
+    <div id="errors" class="msg-region" role="alert" aria-atomic="true"></div>
+    <div id="notices" class="msg-region" role="status" aria-atomic="true"></div>
+    <section class="card" id="step-email" aria-labelledby="email-title" hidden>
+      <h2 id="email-title">Your email address</h2>
+      <p>The address you confirmed when you joined.</p>
+      <form id="email-form" class="form-grid">
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" spellcheck="false">
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn btn-primary">Sign in</button>
+        </div>
+      </form>
+    </section>
+    <section class="card" id="step-wait" aria-labelledby="wait-title" aria-describedby="match-box" tabindex="-1" hidden>
+      <h2 id="wait-title">Approve on your phone</h2>
+      <p>If this address belongs to a member, the VettID app on their phone now has a sign-in request. Approve it <strong>only if it shows the same number</strong> as this page. If the number differs, or you didn't start this sign-in, deny it.</p>
+      <div class="code-box" id="match-box">
+        <span class="code-label">Match code</span>
+        <span class="big-code" id="match"></span>
+      </div>
+      <p class="muted">The request works for 5 minutes. Not a member yet? <a href="/connect/">Join with VettID</a>.</p>
+      <div class="actions">
+        <button type="button" class="link-btn" id="cancel">Use a different email</button>
+      </div>
+      <p class="muted">Starting over doesn't withdraw this request: it stays on the phone until it times out. Deny it there if you won't use it.</p>
+    </section>
+    <section class="card result" id="step-end" aria-labelledby="end-title" tabindex="-1" hidden>
+      <h2 id="end-title">The sign-in didn't complete</h2>
+      <p>It was turned down on the phone, or it timed out. You can try again.</p>
+      <div class="actions">
+        <button type="button" class="btn btn-primary" id="again">Try again</button>
+      </div>
+    </section>
+    <p class="guide-link"><a href="/connect/">New here? Join with VettID <span aria-hidden="true">→</span></a></p>
+  </main>
+  <footer class="site-footer">
+    <ul>
+      <li><a href="https://vettid.org">vettid.org</a></li>
+      <li><a href="https://vettid.org/security/">Privacy &amp; security</a></li>
+      <li><a href="mailto:support@vettid.org">support@vettid.org</a></li>
+    </ul>
+  </footer>
+</body>
+</html>

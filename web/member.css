@@ -1,0 +1,36 @@
+/* Member service additions to styles.css (a copy of the vettid.org
+   account site's stylesheet, kept unchanged so it can be refreshed). */
+
+/* The match code and the SAS: large enough to compare across a room. */
+.big-code {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: clamp(2.2rem, 9vw, 3.2rem);
+  letter-spacing: 0.12em;
+  color: var(--ink-hi);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The invitation: the button on a phone, the QR code on a computer. */
+@media (pointer: coarse) {
+  .pointer-only { display: none; }
+}
+@media not all and (pointer: coarse) {
+  .touch-only { display: none; }
+}
+
+.roster {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.roster li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.roster li:first-child { border-top: 0; }
+.roster .muted { font-size: 0.9rem; }
