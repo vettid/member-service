@@ -81,3 +81,26 @@ func TestFromEdge(t *testing.T) {
 		t.Fatal("no secret: unwrapped")
 	}
 }
+
+func TestHealthcheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	if err := healthcheck(strings.TrimPrefix(srv.URL, "http://")); err != nil {
+		t.Fatal(err)
+	}
+	// The task's own address has no host (":8081"): the probe asks
+	// 127.0.0.1.
+	if err := healthcheck(":" + srv.URL[strings.LastIndexByte(srv.URL, ':')+1:]); err != nil {
+		t.Fatalf("empty host: %v", err)
+	}
+	if err := healthcheck("127.0.0.1:1"); err == nil {
+		t.Fatal("nothing listening")
+	}
+	if err := healthcheck("nonsense"); err == nil {
+		t.Fatal("bad address")
+	}
+}
