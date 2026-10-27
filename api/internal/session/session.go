@@ -369,7 +369,7 @@ func (s *Server) connectStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "store", err)
 		return
 	}
-	s.sendCode(addr, code, tokenKey(id)[:16])
+	s.sendCode(addr, code, mail.Connect, tokenKey(id)[:16])
 	setCookie(w, FlowCookie, id, CodeTTL+5*time.Minute)
 	writeJSON(w, http.StatusAccepted, map[string]any{"expires_at": f.Exp.UTC()})
 }
@@ -410,14 +410,14 @@ func (s *Server) newCode(ctx context.Context, r *http.Request, emailKey, flowLog
 }
 
 // sendCode mails a code in the background ("" sends nothing).
-func (s *Server) sendCode(addr, code, flowLog string) {
+func (s *Server) sendCode(addr, code string, kind mail.Kind, flowLog string) {
 	if code == "" {
 		return
 	}
 	s.goAsync(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.Mail.SendCode(ctx, addr, code); err != nil {
+		if err := s.Mail.SendCode(ctx, addr, code, kind); err != nil {
 			s.log().Warn("code not sent", "flow", flowLog, "err", errName(err))
 		}
 	})
@@ -787,6 +787,7 @@ func (s *Server) webhook(ctx context.Context, e servicevault.Event) error {
 		}
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) {
 			f.Stage, f.ConnID, f.KeyChanged = signInApproved, h.ConnectionID, ev.KeyChanged
+			s.keyChanged(f)
 		})
 	case *servicevault.AdminSetChanged:
 		s.setAdmins(ev.Admins, true, 0)

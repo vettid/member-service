@@ -46,23 +46,38 @@ function wait(matchCode, expiresAt) {
   }, { ...pollMessages(ui), until: Number.isNaN(until.getTime()) ? null : until });
 }
 
-/** The changed-key step: send the code (when the page knows the address), then take it. */
+/**
+ * The changed-key step: send the code (when the page knows the address),
+ * then take it. It keeps asking for the status, so a confirmation that
+ * runs out shows the end.
+ */
 function confirm(codeSent) {
   show('step-confirm');
-  if (codeSent) {
-    codeStep();
-  } else if (email) {
-    sendConfirm(confirmCodeForm);
-  } else {
-    confirmEmailForm.hidden = false;
-    confirmCodeForm.hidden = true;
-    $('confirm-email').focus();
-  }
+  if (codeSent) codeStep();
+  else if (email) sendConfirm(confirmCodeForm);
+  else emailStep();
+  stop?.();
+  stop = poll('/api/signin/status', (st) => {
+    if (st?.status === 'confirm') return false;
+    if (st?.status === 'approved') location.replace('/home/');
+    else show('step-end');
+    return true;
+  }, pollMessages(ui));
+}
+
+function emailStep() {
+  confirmEmailForm.hidden = false;
+  confirmCodeForm.hidden = true;
+  $('confirm-email').focus();
 }
 
 function codeStep() {
   confirmEmailForm.hidden = true;
   confirmCodeForm.hidden = false;
+  // After a reload a code may be on its way without the page knowing the
+  // address: ask for it beside the code rather than send another.
+  $('confirm-code-email-field').hidden = email !== '';
+  $('confirm-code-email').required = email === '';
   $('confirm-to').textContent = email || 'your address';
   $('confirm-code').value = '';
   $('confirm-code').focus();
@@ -71,7 +86,7 @@ function codeStep() {
 async function sendConfirm(target) {
   const res = await ui.busy(target, () => post('/api/signin/confirm', { email }), { busyLabel: 'Sending…' });
   if (res) codeStep();
-  else confirmEmailForm.hidden = false; // e.g. wrong_email: let the address be corrected
+  else emailStep(); // e.g. wrong_email: let the address be corrected
 }
 
 confirmEmailForm.addEventListener('submit', async (e) => {
@@ -81,29 +96,24 @@ confirmEmailForm.addEventListener('submit', async (e) => {
 });
 
 $('confirm-resend').addEventListener('click', async () => {
-  if (!email) {
-    confirmCodeForm.hidden = true;
-    confirmEmailForm.hidden = false;
-    return;
-  }
-  await sendConfirm($('confirm-resend'));
+  if (!email) email = $('confirm-code-email').value.trim();
+  if (email) await sendConfirm($('confirm-resend'));
+  else emailStep();
 });
 
 confirmCodeForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+  const address = email || $('confirm-code-email').value.trim();
   const code = $('confirm-code').value.trim();
-  if (!email) {
-    confirmCodeForm.hidden = true;
-    confirmEmailForm.hidden = false;
-    return;
-  }
-  if (!/^[0-9]{6}$/.test(code)) {
+  if (!address || !/^[0-9]{6}$/.test(code)) {
     ui.showError('Enter the 6-digit code from the email.');
     return;
   }
-  const res = await ui.busy(confirmCodeForm, () => post('/api/signin/verify', { email, code }), { busyLabel: 'Checking…' });
-  if (res?.status === 'approved') location.replace('/home/');
-  else if (res) show('step-end');
+  const res = await ui.busy(confirmCodeForm, () => post('/api/signin/verify', { email: address, code }), { busyLabel: 'Checking…' });
+  if (!res) return;
+  stop?.();
+  if (res.status === 'approved') location.replace('/home/');
+  else show('step-end');
 });
 
 form.addEventListener('submit', async (e) => {

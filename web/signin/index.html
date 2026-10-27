@@ -79,7 +79,11 @@
         </div>
       </form>
       <form id="confirm-code-form" class="form-grid" hidden>
-        <p>We sent a 6-digit code to <strong id="confirm-to"></strong>. It works for 10 minutes. Check your spam or junk folder too.</p>
+        <p>We sent a 6-digit code to <strong id="confirm-to"></strong>. It works for 10 minutes. Check your spam or junk folder too. Never share it with anyone.</p>
+        <div class="field" id="confirm-code-email-field" hidden>
+          <label for="confirm-code-email">Email address</label>
+          <input id="confirm-code-email" name="email" type="email" autocomplete="email" maxlength="254" spellcheck="false">
+        </div>
         <div class="field">
           <label for="confirm-code">Code</label>
           <input id="confirm-code" name="code" class="pin" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required spellcheck="false">

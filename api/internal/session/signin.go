@@ -28,6 +28,9 @@ const (
 	// per hour, before the service vault is asked. It is per source only,
 	// so it says nothing about an address.
 	SignInsPerSource = 30
+	// ConfirmTTL bounds the changed-key confirmation from the approval,
+	// however often a code is sent again.
+	ConfirmTTL = 30 * time.Minute
 )
 
 // SignInCookie holds the browser's sign-in flow (HttpOnly, like the
@@ -62,6 +65,7 @@ type signIn struct {
 	Stage      string    `json:"stage"`
 	ConnID     string    `json:"connection_id,omitempty"`
 	KeyChanged bool      `json:"key_changed,omitempty"`
+	ConfirmBy  time.Time `json:"confirm_by,omitempty"` // the confirmation's end
 	Polled     time.Time `json:"polled,omitempty"`
 	Exp        time.Time `json:"exp"`
 }
@@ -170,6 +174,7 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil && f.Stage == signInPending {
 			applySignInStatus(f, st)
+			s.keyChanged(f)
 			if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
 				s.fail(w, "store", err)
 				return
@@ -190,14 +195,16 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 			// Approved with a credential key the connection's pinned one
 			// does not reach: a reset or a new phone, or someone else who
 			// recovered the account. No session until the member proves
-			// the address too (signInConfirm).
-			s.log().Warn("sign-in with a changed key", "alarm", "key_changed", "connection_id", f.ConnID)
-			f.Stage, f.Exp = signInConfirm, s.now().Add(CodeTTL)
+			// the address too (signInConfirm). Logged for the alarm when
+			// the approval was recorded (keyChanged).
+			now := s.now()
+			f.Stage, f.ConfirmBy = signInConfirm, now.Add(ConfirmTTL)
+			f.Exp = minTime(now.Add(CodeTTL), f.ConfirmBy)
 			if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
 				s.fail(w, "store", err)
 				return
 			}
-			setCookie(w, SignInCookie, id, CodeTTL+5*time.Minute)
+			setCookie(w, SignInCookie, id, f.Exp.Sub(now)+5*time.Minute)
 			writeJSON(w, http.StatusOK, map[string]any{"status": signInConfirm, "expires_at": f.Exp.UTC()})
 			return
 		}
@@ -217,6 +224,21 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 		// without the member (its ask gate), so "denied" would say the
 		// address is a member's (§4.2: the same screen either way).
 		end(signInEnded)
+	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// keyChanged logs, for the alarm, an approval with a changed key as it
+// is recorded (by webhook or poll), once per sign-in.
+func (s *Server) keyChanged(f *signIn) {
+	if f.Stage == signInApproved && f.KeyChanged {
+		s.log().Warn("sign-in with a changed key", "alarm", "key_changed", "connection_id", f.ConnID)
 	}
 }
 
@@ -274,9 +296,9 @@ func (s *Server) signInConfirmStart(w http.ResponseWriter, r *http.Request) {
 	}
 	f.CodeMAC, f.CodeSent = "", true
 	if code != "" {
-		f.CodeMAC = s.mac("code", id+"\x00"+code)
+		f.CodeMAC = s.mac("signin-code", id+"\x00"+code)
 	}
-	f.Exp = s.now().Add(CodeTTL)
+	f.Exp = minTime(s.now().Add(CodeTTL), f.ConfirmBy)
 	if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, false); err != nil {
 		s.fail(w, "store", err)
 		return
@@ -285,8 +307,8 @@ func (s *Server) signInConfirmStart(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "store", err)
 		return
 	}
-	s.sendCode(addr, code, fk[:16])
-	setCookie(w, SignInCookie, id, CodeTTL+5*time.Minute)
+	s.sendCode(addr, code, mail.KeyChange, fk[:16])
+	setCookie(w, SignInCookie, id, f.Exp.Sub(s.now())+5*time.Minute)
 	writeJSON(w, http.StatusAccepted, map[string]any{"expires_at": f.Exp.UTC()})
 }
 
@@ -307,8 +329,9 @@ func (s *Server) signInConfirmVerify(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	ctx := r.Context()
 	okEmail := hmac.Equal([]byte(s.mac("email", mail.Normalize(req.Email))), []byte(f.EmailKey))
-	okCode := f.CodeMAC != "" && hmac.Equal([]byte(s.mac("code", id+"\x00"+req.Code)), []byte(f.CodeMAC))
-	if ok, err := s.tryCode(ctx, r, "signin-verify:"+fk, f.Exp, okEmail && okCode); err != nil {
+	okCode := f.CodeMAC != "" && hmac.Equal([]byte(s.mac("signin-code", id+"\x00"+req.Code)), []byte(f.CodeMAC))
+	// Tries count per code: a new code has its own CodeAttempts.
+	if ok, err := s.tryCode(ctx, r, "signin-verify:"+fk+":"+f.CodeMAC, f.Exp, okEmail && okCode); err != nil {
 		s.fail(w, "rate", err)
 		return
 	} else if !ok {
@@ -338,7 +361,9 @@ func applySignInStatus(f *signIn, st *servicevault.SignInStatus) {
 	case servicevault.SignInStatusApproved:
 		if st.ConnectionID != "" {
 			f.Stage, f.ConnID = signInApproved, st.ConnectionID
-			f.KeyChanged = st.KeyChanged != nil && *st.KeyChanged
+			// A service vault that does not say counts as a change: the
+			// code is asked for rather than skipped.
+			f.KeyChanged = st.KeyChanged == nil || *st.KeyChanged
 		}
 	case servicevault.SignInStatusDenied:
 		f.Stage = signInDenied

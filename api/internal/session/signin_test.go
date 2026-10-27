@@ -1,13 +1,16 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vettid/member-service/api/internal/mail"
 	"github.com/vettid/member-service/api/internal/store"
 	"github.com/vettid/service-vault/sdk/go/servicevault"
 )
@@ -382,5 +385,118 @@ func TestSignInKeyChangedLimits(t *testing.T) {
 	f.now = f.now.Add(CodeTTL)
 	if w := f.do("GET", "/api/signin/status", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("after its time: %d", w.Code)
+	}
+}
+
+// keyChangedSignIn starts a sign-in for c1 and approves it with a changed
+// key by webhook, leaving the flow at confirm.
+func (f *fixture) keyChangedSignIn(id string) {
+	f.t.Helper()
+	f.signInStart()
+	f.hook(id, "signin.approved", "c1", map[string]any{"signin_id": fmt.Sprintf("si%d", len(f.vault.starts)), "key_changed": true})
+	if w := f.do("GET", "/api/signin/status", ""); field(f.t, w, "status") != "confirm" {
+		f.t.Fatalf("status: %s", w.Body)
+	}
+}
+
+// A service vault that does not say whether the key changed: the code is
+// asked for.
+func TestSignInKeyChangedUnknown(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	f.signInStart()
+	f.vault.signins["si1"] = &servicevault.SignInStatus{ID: "si1", Status: servicevault.SignInStatusApproved, ConnectionID: "c1"}
+	f.now = f.now.Add(PollEvery)
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "confirm" || f.jar[SessionCookie] != "" {
+		t.Fatalf("no key_changed: %s", w.Body)
+	}
+}
+
+// The confirm routes answer only in the confirm stage; the email says
+// what happened; a held-back code still answers 202; a new code replaces
+// the last and has its own tries; the confirmation ends ConfirmTTL after
+// the approval however often a code is sent; a removed connection gets
+// no session.
+func TestSignInConfirmRules(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	f.signInStart()
+	if w := f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("confirm while pending: %s", w.Body)
+	}
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"000000"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("verify while pending: %s", w.Body)
+	}
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1", "key_changed": true})
+	f.do("GET", "/api/signin/status", "")
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	if f.mail.kind != mail.KeyChange {
+		t.Fatal("the plain code email")
+	}
+	first := f.mail.code(addr)
+	for range CodeAttempts {
+		f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"999999"}`)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	second := f.mail.code(addr)
+	if first != second {
+		if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"`+first+`"}`); field(t, w, "error") != "invalid_code" {
+			t.Fatalf("the replaced code: %s", w.Body)
+		}
+	}
+	// Codes per address per hour: connect used one, these two; the
+	// next is held back but answered alike.
+	sent := f.mail.sent
+	if w := f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`); w.Code != http.StatusAccepted || f.mail.sent != sent {
+		t.Fatalf("held back: %d, sent %d", w.Code, f.mail.sent-sent)
+	}
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"`+second+`"}`); field(t, w, "error") != "invalid_code" {
+		t.Fatalf("after a held-back resend: %s", w.Body)
+	}
+
+	// ConfirmTTL: resends do not stretch it.
+	f = newFixture(t)
+	f.connected()
+	f.keyChangedSignIn("01EVA")
+	for range 4 {
+		f.now = f.now.Add(ConfirmTTL / 4)
+		f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	}
+	if w := f.do("GET", "/api/signin/status", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("past ConfirmTTL: %d %s", w.Code, w.Body)
+	}
+
+	// Removed before the code is entered.
+	f = newFixture(t)
+	f.connected()
+	f.keyChangedSignIn("01EVB")
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	code := f.mail.code(addr)
+	f.hook("01EVREMOVED", "connection.removed", "c1", map[string]any{"direction": "in"})
+	if w := f.do("POST", "/api/signin/verify", `{"email":"`+addr+`","code":"`+code+`"}`); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
+		t.Fatalf("removed: %s", w.Body)
+	}
+}
+
+// The alarm line is logged once, when the approval is recorded, whether
+// or not the browser asks again; never with the address or the code.
+func TestSignInKeyChangedAlarm(t *testing.T) {
+	f := newFixture(t)
+	var buf bytes.Buffer
+	f.s.Log = slog.New(slog.NewJSONHandler(&buf, nil))
+	f.connected()
+	f.signInStart()
+	f.hook("01EVSIGNIN", "signin.approved", "c1", map[string]any{"signin_id": "si1", "key_changed": true})
+	if n := strings.Count(buf.String(), `"alarm":"key_changed"`); n != 1 {
+		t.Fatalf("alarm lines after the webhook: %d\n%s", n, buf.String())
+	}
+	f.do("GET", "/api/signin/status", "")
+	f.do("POST", "/api/signin/confirm", `{"email":"`+addr+`"}`)
+	if n := strings.Count(buf.String(), `"alarm":"key_changed"`); n != 1 {
+		t.Fatalf("alarm lines: %d", n)
+	}
+	if strings.Contains(buf.String(), addr) || strings.Contains(buf.String(), f.mail.code(addr)) {
+		t.Fatal("the address or the code in the log")
 	}
 }
