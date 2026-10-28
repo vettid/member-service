@@ -25,6 +25,9 @@ import { StaticSite } from './static-site';
 /** The port the member API listens on (MEMBER_API_ADDR). */
 export const API_PORT = 8081;
 
+/** DynamoDB actions of the task role, on the table only: the item calls the API makes. */
+export const TABLE_ACTIONS = ['GetItem', 'PutItem', 'UpdateItem', 'DeleteItem', 'Query'] as const;
+
 /** The service vault's private API port (service-vault cdk API_PORT). */
 export const SERVICE_VAULT_API_PORT = 8080;
 
@@ -294,7 +297,13 @@ export class MemberServiceStack extends cdk.Stack {
       memoryLimitMiB: TASK_MEMORY_MIB,
       runtimePlatform: { cpuArchitecture: ecs.CpuArchitecture.ARM64, operatingSystemFamily: ecs.OperatingSystemFamily.LINUX },
     });
-    this.table.grantReadWriteData(taskDef.taskRole);
+    taskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'Table',
+        actions: TABLE_ACTIONS.map((a) => `dynamodb:${a}`),
+        resources: [this.table.tableArn],
+      }),
+    );
     // ses:SendEmail stays on '*', as in vettid.org's stacks: scoped to the
     // domain identity, sends from the SES sandbox fail (the recipient's
     // identity is checked too).
