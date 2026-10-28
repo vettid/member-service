@@ -139,12 +139,26 @@ What the stack makes:
   - the origin-verify secret.
 
   The webhook secret and the TLS pin come from the service vault's stack.
-- **Alarms:** one per log line the member API marks with `alarm`, and one for the service being down:
+- **Alarms:** one per log line the member API marks with `alarm`, plus ones for errors and for the service's tasks:
   - `verify_failed`: wrong codes reached the hourly alarm level;
   - `key_changed`: a sign-in was approved with a changed credential key.
+  - `errors`: 5 or more ERROR lines in 15 minutes that no alarm above
+    covers (DynamoDB, SES or the service vault failing).
   - `down`: no member API task has run for 10 minutes. It watches the
     ECS service's CPU samples, which ECS reports without Container
     Insights.
+  - `task_stopped`: a task stopped on its own: it exited, failed its
+    health check or failed to start. A crash loop keeps it raised, while
+    `down` may stay quiet because short-lived tasks still report CPU.
+    Stops by a deploy, a scale-in, a Spot reclamation or an operator
+    (stop codes `ServiceSchedulerInitiated`, `SpotInterruption`,
+    `UserInitiated`) don't raise it, except a failed health check.
+  - `deploy_failed`: the circuit breaker failed a deployment and rolled
+    it back.
+
+  ECS's own events for this cluster go to a log group of their own,
+  kept a month, through one EventBridge rule. That rule adds an
+  account-wide CloudWatch Logs resource policy (10 per region).
 
   They always notify someone. The stack requires either an SNS topic
   (`alarmTopicArn`) or an address (`alarmEmail`), and won't synth
