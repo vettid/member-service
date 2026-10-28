@@ -3,8 +3,11 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/vettid/service-vault/sdk/go/webhook"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -102,5 +105,19 @@ func TestHealthcheck(t *testing.T) {
 	}
 	if err := healthcheck("nonsense"); err == nil {
 		t.Fatal("bad address")
+	}
+}
+
+// The CDK forwards these header names to /api/* (cdk WEBHOOK_HEADERS):
+// they must be the SDK's.
+func TestWebhookHeaderNames(t *testing.T) {
+	src, err := os.ReadFile("../../../cdk/lib/member-service-stack.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{webhook.HeaderSignature, webhook.HeaderEventID} {
+		if !strings.Contains(string(src), "'"+h+"'") {
+			t.Fatalf("the CDK does not forward %s", h)
+		}
 	}
 }

@@ -30,6 +30,12 @@ export interface StaticSiteProps {
   readonly apiOriginDomain?: string;
   /** Extra headers CloudFront adds to /api/* origin requests (e.g. an origin-verify secret). */
   readonly apiOriginHeaders?: Record<string, string>;
+  /**
+   * Request headers of the viewer forwarded to /api/* besides the ones
+   * below (e.g. a webhook's signature headers). member-service addition to
+   * vettid.org's construct.
+   */
+  readonly apiForwardHeaders?: string[];
   /** Extra CSP connect-src sources beyond 'self' (e.g. a Cognito or API host). */
   readonly connectSrc?: string[];
   /** ARN of a CLOUDFRONT-scope WAF web ACL (us-east-1). */
@@ -264,7 +270,8 @@ function handler(event) {
         comment: `${props.hostName} /api/*`,
         cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
         queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
-        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList('Content-Type', 'X-VettID-CSRF', 'X-VettID-App', 'CloudFront-Viewer-Address'),
+        headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList('Content-Type', 'X-VettID-CSRF', 'X-VettID-App', 'CloudFront-Viewer-Address',
+          ...(props.apiForwardHeaders ?? [])),
       });
       additionalBehaviors['/api/*'] = {
         origin: new origins.HttpOrigin(props.apiOriginDomain, { customHeaders: props.apiOriginHeaders }),
