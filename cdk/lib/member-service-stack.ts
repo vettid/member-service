@@ -7,6 +7,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
@@ -60,6 +62,16 @@ export const ALARMS = {
   /** A sign-in approved with a credential key the service vault does not recognise (signin.go). */
   key_changed: 'A member approved a sign-in with a changed credential key (reset, new phone, or account recovery by someone else)',
 } as const;
+
+/**
+ * ECS stop codes of the service's own doing (a deploy, a scale-in, a
+ * Spot reclamation, an operator's stop): any other stop, or one for a
+ * failed health check, raises task_stopped.
+ */
+export const EXPECTED_STOP_CODES = ['ServiceSchedulerInitiated', 'SpotInterruption', 'UserInitiated'];
+
+/** ERROR lines (not marked for an alarm of their own) in 15 minutes that raise errors. */
+export const ERROR_THRESHOLD = 5;
 
 export interface MemberServiceStackProps extends cdk.StackProps {
   /** Environment name (e.g. `prod`, `staging`): part of every resource name, and of the service vault's SSM path. */
@@ -407,25 +419,68 @@ export class MemberServiceStack extends cdk.Stack {
       own.addSubscription(new subs.EmailSubscription(props.alarmEmail!));
       topic = own;
     }
-    for (const [name, description] of Object.entries(ALARMS)) {
+    // A metric filter on group and the alarm on its sum per period.
+    const logAlarm = (name: string, description: string, group: logs.ILogGroup, filterPattern: logs.IFilterPattern, threshold = 1, period = cdk.Duration.minutes(5)) => {
       const metric = new logs.MetricFilter(this, `Alarm-${name}`, {
-        logGroup,
-        filterPattern: logs.FilterPattern.stringValue('$.alarm', '=', name),
+        logGroup: group,
+        filterPattern,
         metricNamespace: `VettID/MemberService/${envName}`,
         metricName: name,
         metricValue: '1',
-      }).metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) });
-      const alarm = new cloudwatch.Alarm(this, `Alarm-${name}-alarm`, {
+      }).metric({ statistic: 'Sum', period });
+      new cloudwatch.Alarm(this, `Alarm-${name}-alarm`, {
         alarmName: `${prefix}-${name}`,
         alarmDescription: description,
         metric,
-        threshold: 1,
+        threshold,
         evaluationPeriods: 1,
         comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      });
-      alarm.addAlarmAction(new cwactions.SnsAction(topic));
+      }).addAlarmAction(new cwactions.SnsAction(topic));
+    };
+    for (const [name, description] of Object.entries(ALARMS)) {
+      logAlarm(name, description, logGroup, logs.FilterPattern.stringValue('$.alarm', '=', name));
     }
+    // Errors: ERROR lines that no alarm above covers (internal failures:
+    // DynamoDB, SES, the service vault).
+    logAlarm('errors', `The member API logged ${ERROR_THRESHOLD} or more errors in 15 minutes (DynamoDB, SES or the service vault failing)`, logGroup,
+      logs.FilterPattern.all(logs.FilterPattern.stringValue('$.level', '=', 'ERROR'), logs.FilterPattern.notExists('$.alarm')),
+      ERROR_THRESHOLD, cdk.Duration.minutes(15));
+
+    // ECS events of this cluster (its tasks' state changes, its service's
+    // deployments) go to a log group of their own; one rule, so one
+    // account-wide CloudWatch Logs resource policy. A task that stops on
+    // its own (crashed, failed its health check, failed to start) raises
+    // task_stopped, which a crash loop keeps raised while the down alarm
+    // still sees CPU samples; a deployment the circuit breaker failed
+    // raises deploy_failed.
+    const ecsEvents = new logs.LogGroup(this, 'EcsEvents', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    new events.Rule(this, 'EcsEventsRule', {
+      description: 'Task state changes and deployments of the member API cluster (task_stopped, deploy_failed alarms)',
+      eventPattern: {
+        source: ['aws.ecs'],
+        detailType: ['ECS Task State Change', 'ECS Deployment State Change'],
+        resources: events.Match.anyOf(
+          events.Match.prefix(this.formatArn({ service: 'ecs', resource: 'task', resourceName: `${prefix}/` })),
+          events.Match.prefix(this.formatArn({ service: 'ecs', resource: 'service', resourceName: `${prefix}/` })),
+        ),
+      },
+      targets: [new eventTargets.CloudWatchLogGroup(ecsEvents)],
+    });
+    logAlarm('task_stopped', 'A member API task stopped on its own: it crashed, failed its health check or failed to start (repeated: a crash loop)', ecsEvents,
+      logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.detail.lastStatus', '=', 'STOPPED'),
+        logs.FilterPattern.any(
+          logs.FilterPattern.all(...EXPECTED_STOP_CODES.map((c) => logs.FilterPattern.stringValue('$.detail.stopCode', '!=', c))),
+          logs.FilterPattern.stringValue('$.detail.stoppedReason', '=', 'Task failed*'),
+        ),
+      ));
+    logAlarm('deploy_failed', 'A member API deployment failed and the circuit breaker rolled it back', ecsEvents,
+      logs.FilterPattern.stringValue('$.detail.eventName', '=', 'SERVICE_DEPLOYMENT_FAILED'));
+
     // Down: ECS reports the service's CPU every minute while a task runs
     // (without Container Insights too); no data for 10 minutes means no
     // task (a Spot reclamation is replaced in a minute or two).

@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ALARMS, API_PORT, CLIENT_IP_HEADER, WEBHOOK_HEADERS, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
+import { ALARMS, API_PORT, ERROR_THRESHOLD, EXPECTED_STOP_CODES, CLIENT_IP_HEADER, WEBHOOK_HEADERS, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const base: MemberServiceStackProps = {
@@ -293,7 +293,32 @@ describe('alarms', () => {
       ComparisonOperator: 'LessThanThreshold',
       TreatMissingData: 'breaching',
     });
-    expect(Object.keys(t.findResources('AWS::CloudWatch::Alarm'))).toHaveLength(Object.keys(ALARMS).length + 1);
+    expect(Object.keys(t.findResources('AWS::CloudWatch::Alarm'))).toHaveLength(Object.keys(ALARMS).length + 4); // + errors, task_stopped, deploy_failed, down
+  });
+
+  test('task_stopped and deploy_failed: one rule sends the cluster\'s ECS events to a log group', () => {
+    const rules = Object.values<any>(t.findResources('AWS::Events::Rule'));
+    expect(rules).toHaveLength(1);
+    const p = rules[0].Properties.EventPattern;
+    expect(p.source).toEqual(['aws.ecs']);
+    expect(p['detail-type']).toEqual(['ECS Task State Change', 'ECS Deployment State Change']);
+    const res = JSON.stringify(p.resources);
+    expect(res).toContain(':task/vettid-member-service-test/');
+    expect(res).toContain(':service/vettid-member-service-test/');
+    const filters = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).map((f: any) => f.Properties);
+    const stopped = filters.find((f: any) => f.MetricTransformations[0].MetricName === 'task_stopped').FilterPattern;
+    expect(stopped).toContain('$.detail.lastStatus = "STOPPED"');
+    for (const c of EXPECTED_STOP_CODES) expect(stopped).toContain(`$.detail.stopCode != "${c}"`);
+    expect(stopped).toContain('$.detail.stoppedReason = "Task failed*"');
+    expect(filters.find((f: any) => f.MetricTransformations[0].MetricName === 'deploy_failed').FilterPattern).toContain('SERVICE_DEPLOYMENT_FAILED');
+    for (const n of ['task_stopped', 'deploy_failed']) t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `vettid-member-service-test-${n}`, Threshold: 1 });
+  });
+
+  test('errors: ERROR lines without an alarm of their own, over 15 minutes', () => {
+    const f = Object.values<any>(t.findResources('AWS::Logs::MetricFilter')).map((x: any) => x.Properties)
+      .find((x: any) => x.MetricTransformations[0].MetricName === 'errors');
+    expect(f.FilterPattern).toBe('{ ($.level = "ERROR") && ($.alarm NOT EXISTS) }');
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: 'vettid-member-service-test-errors', Threshold: ERROR_THRESHOLD, Period: 900 });
   });
 
   test('every alarm notifies the topic', () => {
