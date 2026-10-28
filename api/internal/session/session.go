@@ -79,6 +79,9 @@ const (
 	kindRate    = "rate"    // limit key -> counter
 	kindHook    = "hook"    // webhook event id (replay)
 	kindRemoved = "removed" // connection id -> "": removed, never a session again
+	// connection id -> "": suspended (connection.suspended), so that a
+	// connection.added handled later or at the same time keeps the mark.
+	kindSuspended = "suspended"
 )
 
 // RemovedTTL is how long a removed connection is remembered: longer than
@@ -815,15 +818,29 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 		if _, removed, err := s.Store.Get(ctx, kindRemoved, h.ConnectionID); err != nil || removed {
 			return err
 		}
+		suspended, err := s.suspended(ctx, h.ConnectionID)
+		if err != nil {
+			return err
+		}
+		m.Suspended = old.Suspended || suspended
 		if err := s.putJSON(ctx, kindMember, h.ConnectionID, m, time.Time{}, false); err != nil {
 			return err
 		}
-		// A removal handled meanwhile writes its marker before it deletes
-		// the entry: checking again after the write catches it.
+		// A removal or suspension handled meanwhile writes its marker
+		// before it changes the entry: checking again after the write
+		// catches it.
 		if _, removed, err := s.Store.Get(ctx, kindRemoved, h.ConnectionID); err != nil {
 			return err
 		} else if removed {
 			return s.Store.Delete(ctx, kindMember, h.ConnectionID)
+		}
+		if suspended, err := s.suspended(ctx, h.ConnectionID); err != nil {
+			return err
+		} else if suspended && !m.Suspended {
+			m.Suspended = true
+			if err := s.putJSON(ctx, kindMember, h.ConnectionID, m, time.Time{}, false); err != nil {
+				return err
+			}
 		}
 		return s.updateFlow(ctx, ev.InviteID, func(f *flow) { f.Stage, f.ConnID = stageConnected, h.ConnectionID })
 	case *servicevault.ConnectionDeclined:
@@ -848,7 +865,11 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 		return s.Store.Delete(ctx, kindMember, h.ConnectionID)
 	case *servicevault.ConnectionSuspended:
 		// Kept on the roster, marked: an admin sees who must connect
-		// again. Only an entry already there is changed.
+		// again. Only an entry already there is changed; the marker
+		// comes first, for a connection.added handled later or meanwhile.
+		if err := s.Store.Put(ctx, kindSuspended, h.ConnectionID, nil, s.now().Add(RemovedTTL), false); err != nil {
+			return err
+		}
 		var m Member
 		if ok, err := s.getJSON(ctx, kindMember, h.ConnectionID, &m); err != nil || !ok {
 			return err
@@ -881,6 +902,12 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInExpired })
 	}
 	return nil
+}
+
+// suspended reports whether the connection's suspension was handled.
+func (s *Server) suspended(ctx context.Context, connID string) (bool, error) {
+	_, ok, err := s.Store.Get(ctx, kindSuspended, connID)
+	return ok, err
 }
 
 // updateFlow applies change to the flow of an invitation, if any.

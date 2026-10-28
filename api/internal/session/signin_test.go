@@ -283,6 +283,18 @@ func TestSuspendedMember(t *testing.T) {
 	if ok, _ := f.s.getJSON(context.Background(), kindMember, "c2", &m); !ok || m.Suspended {
 		t.Fatalf("new entry %+v", m)
 	}
+
+	// connection.added handled after connection.suspended (a redelivery,
+	// or out of order) keeps the mark.
+	f.hook("01EVSUSP3", "connection.suspended", "c3", map[string]any{"reason": "rotation_conflict"})
+	f.hook("01EVADD3", "connection.added", "c3", map[string]any{"invite_id": "inv3", "name": "Cy"})
+	f.hook("01EVADD0", "connection.added", "c0", map[string]any{"invite_id": "x", "name": "Bob"}) // redelivered after its suspension
+	for _, id := range []string{"c3", "c0"} {
+		var m Member
+		if ok, _ := f.s.getJSON(context.Background(), kindMember, id, &m); !ok || !m.Suspended {
+			t.Fatalf("%s: %+v after a late connection.added", id, m)
+		}
+	}
 }
 
 // Events the flow cannot use are acknowledged and change nothing: an
