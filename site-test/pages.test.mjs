@@ -279,16 +279,18 @@ test('home: a member sees the count, an admin the names', async () => {
   clock();
   const calls = api({
     'GET /api/me': [[200, { connection_id: 'c1', name: 'Ada', joined: '2026-10-27T12:00:00Z', admin: true }]],
-    'GET /api/members': [[200, { count: 2, members: [{ name: 'Bob', joined: '2026-10-26T12:00:00Z' }, { name: '', joined: '2026-10-27T12:00:00Z' }] }]],
+    'GET /api/members': [[200, { count: 2, members: [{ name: 'Bob', joined: '2026-10-26T12:00:00Z' }, { name: '', joined: '2026-10-27T12:00:00Z' }, { name: 'Cy', joined: '2026-10-27T13:00:00Z', suspended: true }] }]],
     'POST /api/signout': [[204]],
   });
   await run('home.js');
   assert.match(page.get('joined').textContent, /admin/);
   const roster = page.get('roster');
   assert.ok(!roster.hidden);
-  assert.equal(roster.children.length, 2);
+  assert.equal(roster.children.length, 3);
   assert.match(roster.children[0].textContent, /^Bob/);
+  assert.doesNotMatch(roster.children[0].textContent, /suspended/);
   assert.match(roster.children[1].textContent, /Name not shared yet/);
+  assert.match(roster.children[2].textContent, /^Cy.*suspended, must connect again/);
 
   await page.get('signout').dispatch('click');
   assert.equal(calls.at(-1).key, 'POST /api/signout');

@@ -244,6 +244,47 @@ func TestMembers(t *testing.T) {
 	}
 }
 
+// A suspended member (connection.suspended) stays on the roster, marked
+// for admins and not counted; their sessions end at the next use. An
+// event for a connection not on the roster changes nothing, and the
+// member's next connection replaces the entry.
+func TestSuspendedMember(t *testing.T) {
+	f := newFixture(t)
+	f.now = f.now.Add(-RateWindow)
+	f.hook("01EVBOB", "connection.added", "c0", map[string]any{"invite_id": "x", "name": "Bob"})
+	f.now = f.now.Add(RateWindow)
+	f.verify()
+	f.hook("01EVADDED", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada"})
+	f.do("GET", "/api/connect/status", "")
+	f.hook("01EVADMIN", "admin_set.changed", "c1", map[string]any{"admins": []string{"c1"}, "added": "c1", "reason": "bootstrap"})
+
+	f.hook("01EVSUSP0", "connection.suspended", "c0", map[string]any{"reason": "rotation_conflict"})
+	f.hook("01EVSUSPX", "connection.suspended", "cX", map[string]any{"reason": "rotation_conflict"})
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "cX"); ok {
+		t.Fatal("a roster entry made for an unknown connection")
+	}
+	b := f.do("GET", "/api/members", "").Body.String()
+	if !strings.Contains(b, `"count":1`) || !strings.Contains(b, `"name":"Bob","joined":`) || !strings.Contains(b, `"suspended":true`) ||
+		strings.Count(b, "suspended") != 1 {
+		t.Fatalf("admin view: %s", b)
+	}
+
+	f.hook("01EVSUSP1", "connection.suspended", "c1", map[string]any{"reason": "rotation_conflict"})
+	if w := f.do("GET", "/api/members", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("a suspended member's session: %d", w.Code)
+	}
+	// Connecting again: the old entry is removed, a new one added.
+	f.hook("01EVREM1", "connection.removed", "c1", map[string]any{"direction": "in"})
+	f.hook("01EVADD2", "connection.added", "c2", map[string]any{"invite_id": "inv2", "name": "Ada"})
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "c1"); ok {
+		t.Fatal("the suspended entry stayed")
+	}
+	var m Member
+	if ok, _ := f.s.getJSON(context.Background(), kindMember, "c2", &m); !ok || m.Suspended {
+		t.Fatalf("new entry %+v", m)
+	}
+}
+
 // Events the flow cannot use are acknowledged and change nothing: an
 // unknown sign-in, and an approval without a connection id. A sign-in
 // the service vault no longer knows ends.

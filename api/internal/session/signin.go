@@ -460,8 +460,9 @@ func (s *Server) isAdmin(ctx context.Context, connID string) bool {
 	return slices.Contains(a.Admins, connID)
 }
 
-// members answers a signed-in member with the roster's size; an admin
-// also gets the names and join times, oldest first. No connection ids.
+// members answers a signed-in member with the roster's size (suspended
+// members not counted); an admin also gets the names and join times,
+// oldest first, with the suspended ones marked. No connection ids.
 func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	conn, _, ok, err := s.Member(ctx, r)
@@ -477,22 +478,27 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "store", err)
 		return
 	}
-	if !s.isAdmin(ctx, conn) {
-		writeJSON(w, http.StatusOK, map[string]any{"count": len(items)})
-		return
-	}
 	type entry struct {
-		Name   string    `json:"name"`
-		Joined time.Time `json:"joined"`
+		Name      string    `json:"name"`
+		Joined    time.Time `json:"joined"`
+		Suspended bool      `json:"suspended,omitempty"`
 	}
 	out := make([]entry, 0, len(items))
+	count := 0
 	for _, it := range items {
 		var m Member
 		if json.Unmarshal(it.Data, &m) != nil {
 			continue
 		}
-		out = append(out, entry{Name: m.Name, Joined: m.Joined.UTC()})
+		if !m.Suspended {
+			count++
+		}
+		out = append(out, entry{Name: m.Name, Joined: m.Joined.UTC(), Suspended: m.Suspended})
+	}
+	if !s.isAdmin(ctx, conn) {
+		writeJSON(w, http.StatusOK, map[string]any{"count": count})
+		return
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Joined.Before(out[j].Joined) })
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(items), "members": out})
+	writeJSON(w, http.StatusOK, map[string]any{"count": count, "members": out})
 }
