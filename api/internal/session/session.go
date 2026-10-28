@@ -81,6 +81,9 @@ const (
 	kindRemoved = "removed" // connection id -> "": removed, never a session again
 	// connection id -> "": suspended (connection.suspended), so that a
 	// connection.added handled later or at the same time keeps the mark.
+	// Kept for good: a suspended connection never comes back (the member
+	// connects again, as a new connection), and the marker must outlive
+	// any roster entry a race left unmarked.
 	kindSuspended = "suspended"
 )
 
@@ -685,6 +688,13 @@ func (s *Server) startSession(ctx context.Context, w http.ResponseWriter, r *htt
 	created := true
 	if err := s.putJSON(ctx, kindMember, connID, &Member{Joined: now.UTC()}, time.Time{}, true); errors.Is(err, store.ErrExists) {
 		created = false
+		// An entry already marked suspended gets no session either.
+		var m Member
+		if ok, err := s.getJSON(ctx, kindMember, connID, &m); err != nil {
+			return err
+		} else if ok && m.Suspended {
+			return errRemoved
+		}
 	} else if err != nil {
 		return err
 	}
@@ -869,7 +879,7 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 		// Kept on the roster, marked: an admin sees who must connect
 		// again. Only an entry already there is changed; the marker
 		// comes first, for a connection.added handled later or meanwhile.
-		if err := s.Store.Put(ctx, kindSuspended, h.ConnectionID, nil, s.now().Add(RemovedTTL), false); err != nil {
+		if err := s.Store.Put(ctx, kindSuspended, h.ConnectionID, nil, time.Time{}, false); err != nil {
 			return err
 		}
 		var m Member

@@ -170,6 +170,24 @@ func TestSignInAfterSuspension(t *testing.T) {
 	}
 }
 
+// The suspension marker is kept for good, and an entry marked suspended
+// gets no session even without it: a sign-in approved long after ends.
+func TestSuspensionLasts(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	f.hook("01EVSUSP", "connection.suspended", "c1", map[string]any{"reason": "rotation_conflict"})
+	f.now = f.now.Add(RemovedTTL + 24*time.Hour)
+	if _, ok, _ := f.st.Get(context.Background(), kindSuspended, "c1"); !ok {
+		t.Fatal("the suspension marker expired")
+	}
+	_ = f.st.Delete(context.Background(), kindSuspended, "c1") // the entry's mark alone
+	f.signInStart()
+	f.hook("01EVAPPROVED", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
+		t.Fatalf("a marked entry's sign-in: %s", w.Body)
+	}
+}
+
 // A browser's sign-in is its own: another browser cannot read or finish
 // it, and an unfinished one ends with its time.
 func TestSignInFlowIsTheBrowsers(t *testing.T) {
