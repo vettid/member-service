@@ -36,6 +36,13 @@ export const TASK_MEMORY_MIB = 512;
 
 /** The header CloudFront adds to every /api/* request (member-api OriginHeader). */
 export const ORIGIN_HEADER = 'X-Origin-Verify';
+/**
+ * Header CloudFront also sends to /api/* when originSecretSerial is set.
+ * Its only use is to change the template, so that a deploy makes
+ * CloudFormation read the origin secret again (README "Rotating the
+ * origin secret"); the member API ignores it.
+ */
+export const ORIGIN_SERIAL_HEADER = 'X-Origin-Verify-Serial';
 
 /**
  * The service vault's webhook headers (service-vault sdk/go/webhook
@@ -101,6 +108,12 @@ export interface MemberServiceStackProps extends cdk.StackProps {
    */
   readonly alarmTopicArn?: string;
   readonly alarmEmail?: string;
+  /**
+   * Set to a value different from the last deploy's (e.g. the date and
+   * time) to make CloudFront send the origin secret's current value
+   * (README "Rotating the origin secret"). Leaving it out later is fine.
+   */
+  readonly originSecretSerial?: string;
 }
 
 /**
@@ -159,6 +172,9 @@ export class MemberServiceStack extends cdk.Stack {
     }
     if (props.alarmEmail && !/^[^@\s]+@[a-z0-9.-]+\.[a-z]+$/.test(props.alarmEmail)) {
       throw new Error(`alarmEmail must be an address (got "${props.alarmEmail}")`);
+    }
+    if (props.originSecretSerial !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(props.originSecretSerial)) {
+      throw new Error(`originSecretSerial must be 1-64 letters, digits, dots, hyphens or underscores (got "${props.originSecretSerial}")`);
     }
     const prefix = `vettid-member-service-${envName}`;
     const svPrefix = props.serviceVaultParams ?? `/vettid/service-vault/${envName}`;
@@ -256,6 +272,12 @@ export class MemberServiceStack extends cdk.Stack {
       description: `Header value CloudFront adds to /api/* requests (${ORIGIN_HEADER}); the member API refuses requests without it`,
       generateSecretString: { passwordLength: 48, excludePunctuation: true, includeSpace: false },
     });
+    // Also accepted by the member API while CloudFront moves to a new
+    // origin secret; between rotations it holds an unused random value.
+    const originPrevious = new secretsmanager.Secret(this, 'OriginVerifyPrevious', {
+      description: `Previous ${ORIGIN_HEADER} value, accepted during a rotation (README "Rotating the origin secret")`,
+      generateSecretString: { passwordLength: 48, excludePunctuation: true, includeSpace: false },
+    });
     const webhookSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'WebhookSecret', sv('webhook-secret-arn'));
     const tlsPin = ssm.StringParameter.fromStringParameterAttributes(this, 'TlsPin', { parameterName: `${svPrefix}/tls-pin`, simpleName: false });
 
@@ -325,6 +347,7 @@ export class MemberServiceStack extends cdk.Stack {
         WEBHOOK_SECRET: ecs.Secret.fromSecretsManager(webhookSecret),
         MEMBER_API_PEPPER: ecs.Secret.fromSecretsManager(pepper),
         ORIGIN_VERIFY_SECRET: ecs.Secret.fromSecretsManager(originSecret),
+        ORIGIN_VERIFY_SECRET_PREVIOUS: ecs.Secret.fromSecretsManager(originPrevious),
       },
       logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'member-api' }),
       stopTimeout: cdk.Duration.seconds(30),
@@ -406,7 +429,10 @@ export class MemberServiceStack extends cdk.Stack {
       sourceDir: SITE_DIR,
       notFoundPage: '404.html',
       apiOriginDomain: `${this.api.apiId}.execute-api.${this.region}.${this.urlSuffix}`,
-      apiOriginHeaders: { [ORIGIN_HEADER]: originSecret.secretValue.unsafeUnwrap() },
+      apiOriginHeaders: {
+        [ORIGIN_HEADER]: originSecret.secretValue.unsafeUnwrap(),
+        ...(props.originSecretSerial ? { [ORIGIN_SERIAL_HEADER]: props.originSecretSerial } : {}),
+      },
       apiForwardHeaders: WEBHOOK_HEADERS,
     });
 
@@ -500,6 +526,8 @@ export class MemberServiceStack extends cdk.Stack {
     out('WebhookUrl', `https://${props.hostName}/api/webhooks/service-vault`, 'The service vault\'s webhookUrl');
     out('TaskSecurityGroupId', this.securityGroup.securityGroupId, 'The member API task\'s security group');
     out('ServiceVaultApiKeySecretArn', apiKey.secretArn, 'The API key (add its SHA-256 to the service vault\'s api-key-hashes)');
+    out('OriginSecretArn', originSecret.secretArn, 'The origin-verify secret CloudFront sends (README "Rotating the origin secret")');
+    out('OriginPreviousSecretArn', originPrevious.secretArn, 'The previous origin-verify secret, accepted during a rotation');
     out('TableName', this.table.tableName, 'The DynamoDB table');
     out('LogGroupName', logGroup.logGroupName, 'The member API\'s log group');
     out('ServiceName', this.service.serviceName, 'The ECS service (force a new deployment to restart the task)');

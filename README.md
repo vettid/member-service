@@ -99,7 +99,9 @@ From the environment (see `.env.example`):
   CloudFront. It needs `ORIGIN_VERIFY_SECRET` (at least 32 bytes): the
   secret the edge sends as `X-Origin-Verify`. Requests without it get
   `403`, except `/api/health`, so the origin can't be reached around
-  the edge.
+  the edge. `ORIGIN_VERIFY_SECRET_PREVIOUS` (optional, at least 32
+  bytes) is accepted as well, for a rotation (see "Rotating the origin
+  secret").
 
 ## Deployment
 
@@ -174,6 +176,7 @@ Context (`-c key=value`):
 | `hostedZoneId`, `zoneName` | yes | The zone the host is in. For staging that's `staging.vettid.org`, whose id vettid.org publishes in SSM at `/vettid-org/staging/dns/zone-id` |
 | `mailFrom` | yes | A sender of a verified SES domain identity, e.g. `no-reply@staging.vettid.org` |
 | `serviceVaultParams` | no | The service vault's SSM path, if not `/vettid/service-vault/<env>` |
+| `originSecretSerial` | no | Only for "Rotating the origin secret": a value different from the last deploy's makes CloudFront send the secret's current value |
 | `alarmTopicArn` or `alarmEmail` | one of them | Where the alarms go. Either an SNS topic that reaches a person, or an address for a topic of the stack's own; confirm that subscription from the email AWS sends. For staging, use vettid.org's vault alerts topic, which emails the admin address: `aws ssm get-parameter --name /vettid-org/staging/vault/alerts-topic-arn` |
 
 First deployment:
@@ -223,16 +226,64 @@ Later:
   vault's key ever changes, restart the member API with
   `aws ecs update-service --force-new-deployment` (the `ClusterName` and
   `ServiceName` outputs).
-- **The origin-verify secret:** CloudFormation reads its value into the
-  distribution only when the distribution changes. To rotate it, change
-  the secret, then deploy a change that touches the distribution (as
-  vettid.org does), and restart the member API.
+- **The origin-verify secret:** see "Rotating the origin secret" below.
 - **Throttling:** the HTTP API's stage limit (50 requests/s, burst 100)
   is shared by every caller. Its execute-api URL is public, so requests
   sent there directly, which the member API refuses without the origin
   secret, count against it too. That's accepted for staging. If it is
   ever abused, put a WAF rate rule on the execute-api stage and raise the
   limit.
+
+### Rotating the origin secret
+
+CloudFront adds `X-Origin-Verify` to every `/api/*` request, and the
+member API refuses requests without it. The value lives in two places
+that change at different times:
+- CloudFront reads it from Secrets Manager only when a deploy changes the
+  distribution;
+- the member API reads it when its task starts.
+
+So the API also accepts a previous value (`OriginPreviousSecretArn`),
+and a rotation moves through it, with no window in which requests fail.
+Rotate the secret when it may have leaked (at once), when someone who
+could read it leaves, or yearly.
+
+The commands never print the secret. Values go through a pipe, and
+`tr -d '\n'` drops the newline `--output text` adds. With `S`, `P`, `C`
+and `N` the `OriginSecretArn`, `OriginPreviousSecretArn`, `ClusterName`
+and `ServiceName` outputs:
+
+1. Keep the current value as the previous one:
+   `aws secretsmanager get-secret-value --secret-id S --query SecretString --output text | tr -d '\n' | aws secretsmanager put-secret-value --secret-id P --secret-string file:///dev/stdin`
+2. Make a new current value:
+   `aws secretsmanager get-random-password --password-length 48 --exclude-punctuation --query RandomPassword --output text | tr -d '\n' | aws secretsmanager put-secret-value --secret-id S --secret-string file:///dev/stdin`
+3. Restart the member API, which then accepts both values:
+   `aws ecs update-service --cluster C --service N --force-new-deployment`,
+   then `aws ecs wait services-stable --cluster C --services N`.
+   CloudFront still sends the old value, which is now the previous one,
+   so the site keeps working. Check that the sign-in page reaches
+   `/api`.
+4. Make CloudFront send the new value. Deploy the stack with its usual
+   context plus `-c originSecretSerial=$(date -u +%Y%m%d%H%M)`. That
+   adds an `X-Origin-Verify-Serial` header, which the member API
+   ignores. The change makes CloudFormation update the distribution and
+   read the secret again. The deploy ends once the distribution is
+   deployed. Edge locations can serve the old configuration for a few
+   minutes more, so wait 15 minutes. Later deploys may leave
+   `originSecretSerial` out: the distribution then reads the same,
+   current value.
+5. Check that CloudFront has moved: the member API logs `request with
+   the previous origin secret` (at most once a minute) while requests
+   still carry the old value. In the `LogGroupName` output's group,
+   none may have appeared for the last 15 minutes, with traffic on the
+   site (load the sign-in page). If one has, wait and look again, or
+   deploy again with a new `originSecretSerial`.
+6. Retire the old value. Give `P` a fresh random value (step 2's
+   command with `--secret-id P`), and restart the member API again (step
+   3). Check the sign-in page once more.
+
+If the secret leaked, go through the steps without waiting longer than
+steps 4 and 5 need: until step 6, the old value still opens the origin.
 
 ## Build and test
 
