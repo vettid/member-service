@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, posix, relative, sep } from 'node:path';
-import { isExcludedSitePath } from './static-site';
+import { HASHED_ASSET, HASH_LENGTH, isExcludedSitePath } from './static-site';
 
-/** Hex digits of a file's content hash in its published name (`connect.<hash>.js`). */
-export const HASH_LENGTH = 12;
+export { HASH_LENGTH };
+
+/** Where builds are kept: in the CDK app's own (git-ignored) output directory. */
+export const BUILD_ROOT = join(__dirname, '..', 'cdk.out', 'site-build');
 
 export interface SiteBuild {
   /** Directory with the published files: the source with JS and CSS renamed. */
@@ -14,14 +15,17 @@ export interface SiteBuild {
   readonly hashed: string[];
 }
 
-// References rewritten to the hashed names. HTML: an absolute src or href
-// to a .js or .css file. JS: the specifier of a static import or export
-// (`from './x.js'`, `import './x.js'`). Anything else that looks like a
-// relative module specifier (a dynamic import, a string built at run time)
-// fails the build rather than loading a stale or missing file.
+// References rewritten to the hashed names. HTML: an absolute,
+// double-quoted src or href to a .js or .css file. JS: the relative
+// specifier of a static import or export (`from './x.js'`, `import
+// './x.js'`). Any other form that names a JS or CSS file (a relative or
+// single-quoted attribute, a query string, an absolute or dynamic import,
+// a CSS @import) fails the build rather than loading a missing file.
 const HTML_REF = /\b(src|href)="(\/[^"?#]+\.(?:js|css))"/g;
+const HTML_ANY = /\b(?:src|href)\s*=\s*["']?[^"'\s>]*\.(?:js|css)(?:[?#][^"'\s>]*)?["']?/gi;
 const JS_IMPORT = /(\bfrom\s*|\bimport\s*)(['"])(\.\.?\/[^'"]+\.js)\2/g;
-const JS_LOOSE = /(['"])\.\.?\/[^'"]*\.js\1/g;
+const JS_LOOSE = /(['"`])[^'"`\s]*\.(?:js|css)(?:[?#][^'"`\s]*)?\1/g;
+const CSS_LOOSE = /@import|url\(\s*['"]?[^)'"]*\.(?:js|css)\b/gi;
 
 /**
  * Copies the site at `srcDir` to a build directory, renaming every JS and
@@ -53,7 +57,7 @@ export function buildSite(srcDir: string): SiteBuild {
     for (const i of imports) {
       if (!read.has(i)) throw new Error(`site build: ${f} imports ${i}, which is not in the site`);
     }
-    const loose = src.replace(JS_IMPORT, '').match(JS_LOOSE);
+    const loose = stripComments(src.replace(JS_IMPORT, '')).match(JS_LOOSE);
     if (loose) throw new Error(`site build: ${f} names ${loose.join(', ')} outside a static import`);
     deps.set(f, imports);
   }
@@ -72,6 +76,10 @@ export function buildSite(srcDir: string): SiteBuild {
     done.add(f);
   };
   for (const f of assets) visit(f, []);
+  for (const f of assets.filter((a) => a.endsWith('.css'))) {
+    const loose = text(f).match(CSS_LOOSE);
+    if (loose) throw new Error(`site build: ${f} names ${loose.join(', ')}, which the build doesn't rewrite`);
+  }
 
   for (const f of files) {
     if (renamed.has(f)) continue;
@@ -84,6 +92,12 @@ export function buildSite(srcDir: string): SiteBuild {
       if (!name) throw new Error(`site build: ${f} refers to ${ref}, which is not in the site`);
       return `${attr}="/${name}"`;
     });
+    // After the rewrite, every JS or CSS reference must be one it made.
+    const loose = (html.match(HTML_ANY) ?? []).filter((m) => {
+      const ref = /^(?:src|href)="(\/[^"?#]+)"$/.exec(m)?.[1];
+      return !ref || !HASHED_ASSET.test(ref);
+    });
+    if (loose.length) throw new Error(`site build: ${f} names ${loose.join(', ')}, which the build doesn't rewrite`);
     out.set(f, Buffer.from(html));
   }
 
@@ -91,8 +105,9 @@ export function buildSite(srcDir: string): SiteBuild {
   for (const [f, body] of [...out].sort(([a], [b]) => (a < b ? -1 : 1))) {
     digest.update(`${f}\0${body.length}\0`).update(body);
   }
-  const root = join(tmpdir(), 'member-service-site');
+  const root = BUILD_ROOT;
   const dir = join(root, digest.digest('hex').slice(0, 32));
+  if (existsSync(dir) && !holds(dir, out)) rmSync(dir, { recursive: true, force: true });
   if (!existsSync(dir)) {
     // Written aside and renamed into place, so a concurrent synth never
     // sees a half-written directory.
@@ -121,6 +136,21 @@ function walk(dir: string): string[] {
       return statSync(p).isDirectory() ? all(p) : [relative(dir, p).split(sep).join('/')];
     });
   return all(dir).filter((p) => !isExcludedSitePath(p)).sort();
+}
+
+/** True if `dir` holds exactly the files in `out`, byte for byte. */
+function holds(dir: string, out: Map<string, Buffer>): boolean {
+  try {
+    const have = walk(dir);
+    return have.length === out.size && have.every((f) => out.get(f)?.equals(readFileSync(join(dir, ...f.split('/')))));
+  } catch {
+    return false;
+  }
+}
+
+/** JS without its comments (a comment may name a file; it loads nothing). */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
 
 function resolve(from: string, spec: string): string {

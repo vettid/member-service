@@ -59,9 +59,14 @@ hash covers its rewritten imports, so a change to `dom.js` also renames
 every module that imports it. Hashed files are cached for a year as
 immutable; pages revalidate on every visit, and fonts and images cache
 for a week. A deploy therefore takes effect on a member's next page
-load, never mixing old and new modules. Only static imports are
-rewritten: the build refuses a dynamic `import()` or any other `./*.js`
-string, and a page reference to a file that isn't there.
+load, never mixing old and new modules. Hashed files from earlier
+deploys stay in the bucket, so a page loaded just before a deploy still
+finds its files, and the pages are uploaded only after the new hashed
+files. Only absolute, double-quoted `src`/`href` and relative static
+imports are rewritten: the build refuses any other form that names a JS
+or CSS file (a relative or single-quoted attribute, a query string, a
+dynamic or absolute import, a CSS `@import`), and a reference to a file
+that isn't there. The build is kept in `cdk/cdk.out/site-build/`.
 
 ## Member API
 
@@ -130,8 +135,10 @@ What the stack makes:
 
 - **The site:** `web/` on S3 and CloudFront at `hostName`, using
   vettid.org's StaticSite construct (`cdk/lib/static-site.ts`, a copy of
-  vettid.org `lib/constructs/static-site.ts` with one addition,
-  `apiForwardHeaders`, for the webhook signature headers). It has
+  vettid.org `lib/constructs/static-site.ts` with two additions:
+  `apiForwardHeaders`, for the webhook signature headers, and
+  `hashedAssets`, for the content-hashed JS and CSS described under
+  "Site"). It has
   that construct's CSP, headers and branded 404, and a certificate in the
   zone.
 - **`/api/*`:** CloudFront forwards it to an API Gateway HTTP API, adding

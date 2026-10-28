@@ -287,19 +287,28 @@ describe('API and site', () => {
     expect(fn).toContain('NOT_FOUND');
   });
 
-  test('site: hashed JS and CSS cache a year as immutable, other assets a week, pages revalidate', () => {
-    const deployments = Object.values<any>(t.findResources('Custom::CDKBucketDeployment')).map((r) => r.Properties);
-    const by = (cc: string) => deployments.filter((d) => json(d.SystemMetadata ?? {}).includes(cc));
-    const [immutable] = by('max-age=31536000, immutable');
-    const [assets] = by('max-age=604800');
-    const [pages] = by('must-revalidate');
-    expect(immutable.Exclude).toEqual(['*']);
-    expect(immutable.Include.length).toBeGreaterThan(0);
-    for (const f of immutable.Include) expect(f).toMatch(/\.[0-9a-f]{12}\.(js|css)$/);
-    expect(immutable.Include).toEqual(expect.arrayContaining([expect.stringMatching(/^js\/connect\./), expect.stringMatching(/^styles\./)]));
-    // The weekly pass leaves the hashed files to the immutable pass.
-    expect(assets.Exclude).toEqual(expect.arrayContaining(immutable.Include));
-    expect(pages.Include).toEqual(expect.arrayContaining(['*.html']));
+  test('site: hashed JS and CSS cache a year as immutable and stay across deploys; pages go out after them', () => {
+    const resources = t.findResources('Custom::CDKBucketDeployment');
+    const by = (cc: string) => Object.entries<any>(resources).filter(([, r]) => json(r.Properties.SystemMetadata ?? {}).includes(cc));
+    const [[immutableId, immutable]] = by('max-age=31536000, immutable');
+    const [[, assets]] = by('max-age=604800');
+    const [[, pages]] = by('must-revalidate');
+    const globs = ['js', 'css'].map((ext) => `*.${'[0-9a-f]'.repeat(12)}.${ext}`);
+    expect(immutable.Properties.Exclude).toEqual(['*']);
+    expect(immutable.Properties.Include).toEqual(globs);
+    // Never pruned: a page loaded before a deploy still finds its files.
+    expect(immutable.Properties.Prune).toBe(false);
+    // The weekly pass neither uploads nor prunes them.
+    expect(assets.Properties.Exclude).toEqual(expect.arrayContaining(globs));
+    expect(pages.Properties.Include).toEqual(expect.arrayContaining(['*.html']));
+    expect(pages.DependsOn).toEqual(expect.arrayContaining([immutableId]));
+  });
+
+  test('site: the 404 check passes any hashed asset name to S3', () => {
+    const fn = Object.values<any>(t.findResources('AWS::CloudFront::Function'))[0].Properties.FunctionCode as string;
+    expect(fn).toContain('!/\\.[0-9a-f]{12}\\.(js|css)$/.test(uri)');
+    expect(fn).toMatch(/"\/js\/connect\.[0-9a-f]{12}\.js":1/);
+    expect(fn).not.toContain('"/js/connect.js"');
   });
 });
 

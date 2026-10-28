@@ -1,12 +1,15 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { HASH_LENGTH, buildSite } from '../lib/site-build';
+import { BUILD_ROOT, HASH_LENGTH, buildSite } from '../lib/site-build';
 import { SITE_DIR } from '../lib/member-service-stack';
+
+const scratch = mkdtempSync(join(tmpdir(), 'site-build-test-'));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 /** A throwaway site from `{ path: content }`. */
 const site = (files: Record<string, string>) => {
-  const dir = mkdtempSync(join(tmpdir(), 'site-build-test-'));
+  const dir = mkdtempSync(join(scratch, 'site-'));
   for (const [f, body] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, f)), { recursive: true });
     writeFileSync(join(dir, f), body);
@@ -56,6 +59,28 @@ test('refuses references it cannot rewrite', () => {
   expect(() => buildSite(site({ ...BASE, 'js/lib.js': "import './gone.js';" }))).toThrow(/imports js\/gone\.js/);
   expect(() => buildSite(site({ ...BASE, 'js/lib.js': "await import('./app.js');" }))).toThrow(/outside a static import/);
   expect(() => buildSite(site({ ...BASE, 'js/lib.js': "import './app.js';" }))).toThrow(/import cycle/);
+  // Forms the build doesn't rewrite.
+  for (const page of ['<script src="js/app.js"></script>', "<link href='/styles.css'>", '<link href="/styles.css?v=1">']) {
+    expect(() => buildSite(site({ ...BASE, 'index.html': page }))).toThrow(/doesn't rewrite/);
+  }
+  for (const js of ["import x from '/js/lib.js';", 'import(`./lib.js`);', "const u = 'styles.css';"]) {
+    expect(() => buildSite(site({ ...BASE, 'js/lib.js': js }))).toThrow(/outside a static import/);
+  }
+  expect(() => buildSite(site({ ...BASE, 'styles.css': "@import '/x.css';" }))).toThrow(/doesn't rewrite/);
+  // A comment loads nothing.
+  expect(() => buildSite(site({ ...BASE, 'js/lib.js': "// see './app.js'\n/* and 'ui.js' */\nexport const x = 1;" }))).not.toThrow();
+});
+
+test('builds in the CDK output directory, and rebuilds a directory that was changed', () => {
+  const b = buildSite(site(BASE));
+  expect(b.dir.startsWith(BUILD_ROOT)).toBe(true);
+  const app = b.hashed.find((h) => h.startsWith('js/app.'))!;
+  writeFileSync(join(b.dir, app), 'tampered');
+  expect(buildSite(site(BASE)).dir).toBe(b.dir);
+  expect(read(b.dir, app)).not.toBe('tampered');
+  rmSync(join(b.dir, 'index.html'));
+  buildSite(site(BASE));
+  expect(read(b.dir, 'index.html')).toContain('<script');
 });
 
 test('skips files the deployment excludes', () => {

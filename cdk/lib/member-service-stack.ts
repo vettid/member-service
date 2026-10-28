@@ -431,7 +431,7 @@ export class MemberServiceStack extends cdk.Stack {
       hostName: props.hostName,
       hostedZone: zone,
       sourceDir: site.dir,
-      immutable: site.hashed,
+      hashedAssets: true,
       notFoundPage: '404.html',
       apiOriginDomain: `${this.api.apiId}.execute-api.${this.region}.${this.urlSuffix}`,
       apiOriginHeaders: {
