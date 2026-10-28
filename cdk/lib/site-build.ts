@@ -20,7 +20,8 @@ export interface SiteBuild {
 // specifier of a static import or export (`from './x.js'`, `import
 // './x.js'`). Any other form that names a JS or CSS file (a relative or
 // single-quoted attribute, a query string, an absolute or dynamic import,
-// a CSS @import) fails the build rather than loading a missing file.
+// a CSS @import) fails the build rather than loading a missing file. The
+// check is textual: a comment that quotes such a name fails it too.
 const HTML_REF = /\b(src|href)="(\/[^"?#]+\.(?:js|css))"/g;
 const HTML_ANY = /\b(?:src|href)\s*=\s*["']?[^"'\s>]*\.(?:js|css)(?:[?#][^"'\s>]*)?["']?/gi;
 const JS_IMPORT = /(\bfrom\s*|\bimport\s*)(['"])(\.\.?\/[^'"]+\.js)\2/g;
@@ -57,7 +58,7 @@ export function buildSite(srcDir: string): SiteBuild {
     for (const i of imports) {
       if (!read.has(i)) throw new Error(`site build: ${f} imports ${i}, which is not in the site`);
     }
-    const loose = stripComments(src.replace(JS_IMPORT, '')).match(JS_LOOSE);
+    const loose = src.replace(JS_IMPORT, '').match(JS_LOOSE);
     if (loose) throw new Error(`site build: ${f} names ${loose.join(', ')} outside a static import`);
     deps.set(f, imports);
   }
@@ -146,11 +147,6 @@ function holds(dir: string, out: Map<string, Buffer>): boolean {
   } catch {
     return false;
   }
-}
-
-/** JS without its comments (a comment may name a file; it loads nothing). */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 }
 
 function resolve(from: string, spec: string): string {

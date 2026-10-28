@@ -67,8 +67,9 @@ test('refuses references it cannot rewrite', () => {
     expect(() => buildSite(site({ ...BASE, 'js/lib.js': js }))).toThrow(/outside a static import/);
   }
   expect(() => buildSite(site({ ...BASE, 'styles.css': "@import '/x.css';" }))).toThrow(/doesn't rewrite/);
-  // A comment loads nothing.
-  expect(() => buildSite(site({ ...BASE, 'js/lib.js': "// see './app.js'\n/* and 'ui.js' */\nexport const x = 1;" }))).not.toThrow();
+  // Textual: a quoted name hidden behind a comment or a string with // is still found.
+  expect(() => buildSite(site({ ...BASE, 'js/lib.js': "const s = 'a // b'; load('./app.js');" }))).toThrow(/outside a static import/);
+  expect(() => buildSite(site({ ...BASE, 'js/lib.js': "const a = 'image/*'; import('./app.js'); /* done */" }))).toThrow(/outside a static import/);
 });
 
 test('builds in the CDK output directory, and rebuilds a directory that was changed', () => {
