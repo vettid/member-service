@@ -1,3 +1,8 @@
+// A copy of vettid.org lib/constructs/static-site.ts, kept in step with it
+// apart from the props marked "member-service addition".
+// upstream: fbe722788a4303a2e4da70dafc2e2c62e45ec133
+// (.github/workflows/upstream.yml fails when vettid.org's file has commits
+// after this one: port them here, then move the line.)
 import * as cdk from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';

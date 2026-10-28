@@ -138,7 +138,9 @@ What the stack makes:
   vettid.org `lib/constructs/static-site.ts` with two additions:
   `apiForwardHeaders`, for the webhook signature headers, and
   `hashedAssets`, for the content-hashed JS and CSS described under
-  "Site"). It has
+  "Site"). Its `// upstream:` line names the vettid.org commit it is in
+  step with; the weekly `upstream` workflow fails when vettid.org's file
+  has newer commits, which are then ported here. It has
   that construct's CSP, headers and branded 404, and a certificate in the
   zone.
 - **`/api/*`:** CloudFront forwards it to an API Gateway HTTP API, adding

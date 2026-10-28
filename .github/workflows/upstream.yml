@@ -1,0 +1,41 @@
+name: upstream
+
+# cdk/lib/static-site.ts is a copy of vettid.org's StaticSite construct.
+# This fails when vettid.org's file has commits after the one the copy
+# names on its "upstream:" line, so fixes there aren't missed here.
+# Weekly and by hand, not on pull requests: a change upstream shouldn't
+# hold back unrelated work.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-site:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: vettid.org lib/constructs/static-site.ts since the copy's commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pinned=$(sed -nE 's|^// upstream: ([0-9a-f]{40})$|\1|p' cdk/lib/static-site.ts)
+          [ -n "$pinned" ] || { echo "::error::no '// upstream: <commit>' line in cdk/lib/static-site.ts"; exit 1; }
+          newer=$(gh api "repos/vettid/vettid.org/commits?path=lib/constructs/static-site.ts&per_page=100" \
+            --jq "[.[].sha] | index(\"$pinned\") as \$i | if \$i == null then \"unknown\" else .[:\$i][] end")
+          if [ "$newer" = unknown ]; then
+            echo "::error::$pinned is not among vettid.org's last 100 commits to the file"; exit 1
+          fi
+          if [ -n "$newer" ]; then
+            for c in $newer; do
+              echo "::error::vettid.org $c changed lib/constructs/static-site.ts: port it to cdk/lib/static-site.ts"
+            done
+            exit 1
+          fi
+          echo "cdk/lib/static-site.ts is in step with vettid.org ($pinned)" | tee -a "$GITHUB_STEP_SUMMARY"
