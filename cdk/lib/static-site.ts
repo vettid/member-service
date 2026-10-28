@@ -67,7 +67,23 @@ export interface StaticSiteProps {
    * Only `*.json` / `*.txt`: they ride in the revalidating pass.
    */
   readonly files?: Record<string, string>;
+  /**
+   * The site's JS and CSS carry a hash of their content in their names
+   * (HASHED_ASSET, e.g. `js/connect.3f2a9c1b04de.js`, from buildSite).
+   * They are cached for a year as immutable, kept across deploys (pages
+   * loaded before a deploy still find theirs), and passed to S3 by the
+   * 404 check whether or not they are in this build. member-service
+   * addition to vettid.org's construct.
+   */
+  readonly hashedAssets?: boolean;
 }
+
+/** Hex digits of the content hash in a hashed asset's name. */
+export const HASH_LENGTH = 12;
+/** A hashed asset's name: `<name>.<HASH_LENGTH hex>.js` or `.css`. */
+export const HASHED_ASSET = new RegExp(`\\.[0-9a-f]{${HASH_LENGTH}}\\.(js|css)$`);
+/** HASHED_ASSET as S3 sync filter globs. */
+const HASHED_GLOBS = ['js', 'css'].map((ext) => `*.${'[0-9a-f]'.repeat(HASH_LENGTH)}.${ext}`);
 
 /** Every file the deployment will put in the bucket, as request paths. */
 function sitePaths(dir: string): string[] {
@@ -220,7 +236,7 @@ export class StaticSite extends Construct {
         'permissions-policy': { value: 'camera=(), microphone=(), geolocation=(), payment=()' },
       };
       notFound = `
-  if (!FILES[uri]) {
+  if (!FILES[uri]${props.hashedAssets ? ` && !${HASHED_ASSET}.test(uri)` : ''}) {
     return { statusCode: 404, statusDescription: 'Not Found', headers: ${JSON.stringify(fnHeaders)},
       body: { encoding: 'text', data: NOT_FOUND } };
   }
@@ -311,21 +327,35 @@ function handler(event) {
     new route53.ARecord(this, 'Alias', { zone: props.hostedZone, recordName: props.hostName, target });
     new route53.AaaaRecord(this, 'AliasV6', { zone: props.hostedZone, recordName: props.hostName, target });
 
-    // Two passes, as on the main site: HTML/JSON revalidate every visit,
-    // static assets cache for a week. Each pass's include/exclude filter also
+    // Passes as on the main site: HTML/JSON revalidate every visit, static
+    // assets cache for a week. Each pass's include/exclude filter also
     // scopes its pruning to its own files. config.json rides in the
-    // revalidating pass so it is never stale and never pruned.
+    // revalidating pass so it is never stale and never pruned. With
+    // `hashedAssets`, a third pass caches those for a year and never
+    // prunes, so a page loaded before a deploy still finds its files; the
+    // pages go out only after it, so a new page never names a missing one.
     const revalidate = ['*.html', '*.json', '*.txt', '*.xml'];
+    const hashed = props.hashedAssets ? HASHED_GLOBS : [];
     const content = s3deploy.Source.asset(props.sourceDir, { exclude: SITE_EXCLUDE });
+    const immutable = props.hashedAssets
+      ? new s3deploy.BucketDeployment(this, 'DeployImmutable', {
+          sources: [content],
+          destinationBucket: this.bucket,
+          exclude: ['*'],
+          include: hashed,
+          prune: false,
+          cacheControl: [s3deploy.CacheControl.fromString('public, max-age=31536000, immutable')],
+        })
+      : undefined;
     new s3deploy.BucketDeployment(this, 'DeployAssets', {
       sources: [content],
       destinationBucket: this.bucket,
-      exclude: revalidate,
+      exclude: [...revalidate, ...hashed],
       cacheControl: [s3deploy.CacheControl.fromString('public, max-age=604800')],
       distribution: this.distribution,
       distributionPaths: ['/*'],
     });
-    new s3deploy.BucketDeployment(this, 'DeployHtml', {
+    const html = new s3deploy.BucketDeployment(this, 'DeployHtml', {
       sources: [
         content,
         ...(props.runtimeConfig ? [s3deploy.Source.jsonData('config.json', props.runtimeConfig)] : []),
@@ -339,5 +369,6 @@ function handler(event) {
       distribution: this.distribution,
       distributionPaths: ['/*'],
     });
+    if (immutable) html.node.addDependency(immutable);
   }
 }
