@@ -180,6 +180,14 @@ describe('task', () => {
     }
   });
 
+  test('task role: exactly the item calls the API makes, on the table itself', () => {
+    const tableId = Object.keys(t.findResources('AWS::DynamoDB::Table'))[0];
+    const ddb = taskRoleStatements().filter((s) => [s.Action].flat().some((a: string) => a.startsWith('dynamodb:')));
+    expect(ddb).toHaveLength(1);
+    expect([ddb[0].Action].flat().sort()).toEqual(['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query', 'dynamodb:UpdateItem']);
+    expect([ddb[0].Resource].flat()).toEqual([{ 'Fn::GetAtt': [tableId, 'Arn'] }]);
+  });
+
   test('the generated secrets: the API key and pepper retained; nothing retained has a fixed name', () => {
     const secrets = Object.entries<any>(t.findResources('AWS::SecretsManager::Secret'));
     expect(secrets.map(([id]) => id.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual(['OriginVerify', 'OriginVerifyPrevious', 'Pepper', 'ServiceVaultApiKey']);
