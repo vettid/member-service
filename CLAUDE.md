@@ -29,7 +29,8 @@ node --test site-test/*.test.mjs
 
 - Backend: standard library first (`net/http`, `log/slog`, `flag`), plus
   the service vault's `sdk/go`. No frameworks.
-- Site: plain HTML/CSS/JS with no build step and no third-party scripts,
+- Site: plain HTML/CSS/JS with no build step (the deploy only renames
+  JS and CSS to content-hashed names; README "Site") and no third-party scripts,
   fonts or analytics. It must work under the StaticSite construct's
   headers in vettid.org (`script-src 'self'`, no `unsafe-inline`,
   Trusted Types, `Referrer-Policy: no-referrer`).

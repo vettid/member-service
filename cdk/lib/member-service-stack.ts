@@ -19,6 +19,7 @@ import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { join } from 'node:path';
+import { buildSite } from './site-build';
 import { StaticSite } from './static-site';
 
 /** The port the member API listens on (MEMBER_API_ADDR). */
@@ -423,10 +424,14 @@ export class MemberServiceStack extends cdk.Stack {
 
     // ---- Site ---------------------------------------------------------------
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId: props.hostedZoneId, zoneName: props.zoneName });
+    // JS and CSS published under content-hashed names (site-build.ts), so
+    // they cache as immutable and a deploy never mixes old and new modules.
+    const site = buildSite(SITE_DIR);
     this.site = new StaticSite(this, 'Site', {
       hostName: props.hostName,
       hostedZone: zone,
-      sourceDir: SITE_DIR,
+      sourceDir: site.dir,
+      immutable: site.hashed,
       notFoundPage: '404.html',
       apiOriginDomain: `${this.api.apiId}.execute-api.${this.region}.${this.urlSuffix}`,
       apiOriginHeaders: {

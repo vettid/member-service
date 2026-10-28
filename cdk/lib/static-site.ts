@@ -67,6 +67,13 @@ export interface StaticSiteProps {
    * Only `*.json` / `*.txt`: they ride in the revalidating pass.
    */
   readonly files?: Record<string, string>;
+  /**
+   * Site-relative paths of files whose names carry a hash of their content
+   * (e.g. `js/connect.3f2a9c1b04de.js`, from buildSite): cached for a year
+   * as immutable, since a changed file gets a new name. member-service
+   * addition to vettid.org's construct.
+   */
+  readonly immutable?: string[];
 }
 
 /** Every file the deployment will put in the bucket, as request paths. */
@@ -311,16 +318,36 @@ function handler(event) {
     new route53.ARecord(this, 'Alias', { zone: props.hostedZone, recordName: props.hostName, target });
     new route53.AaaaRecord(this, 'AliasV6', { zone: props.hostedZone, recordName: props.hostName, target });
 
-    // Two passes, as on the main site: HTML/JSON revalidate every visit,
-    // static assets cache for a week. Each pass's include/exclude filter also
+    // Passes as on the main site: HTML/JSON revalidate every visit, static
+    // assets cache for a week. Each pass's include/exclude filter also
     // scopes its pruning to its own files. config.json rides in the
-    // revalidating pass so it is never stale and never pruned.
+    // revalidating pass so it is never stale and never pruned. With
+    // `immutable`, a third pass caches those files for a year; a hashed
+    // name left from an earlier deploy falls in the weekly pass's scope
+    // and is pruned there.
     const revalidate = ['*.html', '*.json', '*.txt', '*.xml'];
+    const immutable = props.immutable ?? [];
+    for (const path of immutable) {
+      if (!/^[a-z0-9][a-z0-9._/-]*$/i.test(path) || path.includes('..') || path.includes('//') || revalidate.some((g) => path.endsWith(g.slice(1)))) {
+        throw new Error(`${props.hostName}: immutable path ${path} must be a relative path to a static asset`);
+      }
+    }
     const content = s3deploy.Source.asset(props.sourceDir, { exclude: SITE_EXCLUDE });
+    if (immutable.length > 0) {
+      new s3deploy.BucketDeployment(this, 'DeployImmutable', {
+        sources: [content],
+        destinationBucket: this.bucket,
+        exclude: ['*'],
+        include: immutable,
+        cacheControl: [s3deploy.CacheControl.fromString('public, max-age=31536000, immutable')],
+        distribution: this.distribution,
+        distributionPaths: ['/*'],
+      });
+    }
     new s3deploy.BucketDeployment(this, 'DeployAssets', {
       sources: [content],
       destinationBucket: this.bucket,
-      exclude: revalidate,
+      exclude: [...revalidate, ...immutable],
       cacheControl: [s3deploy.CacheControl.fromString('public, max-age=604800')],
       distribution: this.distribution,
       distributionPaths: ['/*'],

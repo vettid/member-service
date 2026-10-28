@@ -51,6 +51,18 @@ vettid.org account site (`sites/account`), so the two sites look alike;
 keep them unchanged and refresh them from there. The member service's
 own styles are in `member.css`.
 
+The files in `web/` are edited and tested as they are. At deploy, the
+CDK app (`cdk/lib/site-build.ts`) publishes every JS and CSS file under
+a name with its content hash (`js/connect.<hash>.js`), rewriting the
+pages' `src`/`href` and the modules' static imports to match. A module's
+hash covers its rewritten imports, so a change to `dom.js` also renames
+every module that imports it. Hashed files are cached for a year as
+immutable; pages revalidate on every visit, and fonts and images cache
+for a week. A deploy therefore takes effect on a member's next page
+load, never mixing old and new modules. Only static imports are
+rewritten: the build refuses a dynamic `import()` or any other `./*.js`
+string, and a page reference to a file that isn't there.
+
 ## Member API
 
 All routes are under `/api`, same-origin with the site. Sessions use

@@ -286,6 +286,21 @@ describe('API and site', () => {
     expect(fn).toContain('"/signin/index.html":1');
     expect(fn).toContain('NOT_FOUND');
   });
+
+  test('site: hashed JS and CSS cache a year as immutable, other assets a week, pages revalidate', () => {
+    const deployments = Object.values<any>(t.findResources('Custom::CDKBucketDeployment')).map((r) => r.Properties);
+    const by = (cc: string) => deployments.filter((d) => json(d.SystemMetadata ?? {}).includes(cc));
+    const [immutable] = by('max-age=31536000, immutable');
+    const [assets] = by('max-age=604800');
+    const [pages] = by('must-revalidate');
+    expect(immutable.Exclude).toEqual(['*']);
+    expect(immutable.Include.length).toBeGreaterThan(0);
+    for (const f of immutable.Include) expect(f).toMatch(/\.[0-9a-f]{12}\.(js|css)$/);
+    expect(immutable.Include).toEqual(expect.arrayContaining([expect.stringMatching(/^js\/connect\./), expect.stringMatching(/^styles\./)]));
+    // The weekly pass leaves the hashed files to the immutable pass.
+    expect(assets.Exclude).toEqual(expect.arrayContaining(immutable.Include));
+    expect(pages.Include).toEqual(expect.arrayContaining(['*.html']));
+  });
 });
 
 describe('alarms', () => {
