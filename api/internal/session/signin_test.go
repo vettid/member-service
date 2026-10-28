@@ -153,6 +153,23 @@ func TestSignInDeniedAndRemoved(t *testing.T) {
 
 }
 
+// A sign-in approved after the connection's suspension was handled, and
+// before its connection.added (no roster entry yet): no session.
+func TestSignInAfterSuspension(t *testing.T) {
+	f := newFixture(t)
+	f.connected()
+	f.signInStart()
+	_ = f.st.Delete(context.Background(), kindMember, "c1") // as if connection.added had not been handled
+	f.hook("01EVSUSP", "connection.suspended", "c1", map[string]any{"reason": "rotation_conflict"})
+	f.hook("01EVAPPROVED", "signin.approved", "c1", map[string]any{"signin_id": "si1"})
+	if w := f.do("GET", "/api/signin/status", ""); field(t, w, "status") != "ended" || f.jar[SessionCookie] != "" {
+		t.Fatalf("suspended: %s", w.Body)
+	}
+	if _, ok, _ := f.st.Get(context.Background(), kindMember, "c1"); ok {
+		t.Fatal("a roster entry made for a suspended connection")
+	}
+}
+
 // A browser's sign-in is its own: another browser cannot read or finish
 // it, and an unfinished one ends with its time.
 func TestSignInFlowIsTheBrowsers(t *testing.T) {

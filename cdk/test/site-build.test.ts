@@ -63,7 +63,8 @@ test('refuses references it cannot rewrite', () => {
   for (const page of ['<script src="js/app.js"></script>', "<link href='/styles.css'>", '<link href="/styles.css?v=1">']) {
     expect(() => buildSite(site({ ...BASE, 'index.html': page }))).toThrow(/doesn't rewrite/);
   }
-  for (const js of ["import x from '/js/lib.js';", 'import(`./lib.js`);', "const u = 'styles.css';"]) {
+  for (const js of ["import x from '/js/lib.js';", 'import(`./lib.js`);', "const u = 'styles.css';", 'const n = "lib"; import(n);',
+    '//# sourceMappingURL=app.js.map']) {
     expect(() => buildSite(site({ ...BASE, 'js/lib.js': js }))).toThrow(/outside a static import/);
   }
   expect(() => buildSite(site({ ...BASE, 'styles.css': "@import '/x.css';" }))).toThrow(/doesn't rewrite/);

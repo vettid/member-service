@@ -26,6 +26,9 @@ const HTML_REF = /\b(src|href)="(\/[^"?#]+\.(?:js|css))"/g;
 const HTML_ANY = /\b(?:src|href)\s*=\s*["']?[^"'\s>]*\.(?:js|css)(?:[?#][^"'\s>]*)?["']?/gi;
 const JS_IMPORT = /(\bfrom\s*|\bimport\s*)(['"])(\.\.?\/[^'"]+\.js)\2/g;
 const JS_LOOSE = /(['"`])[^'"`\s]*\.(?:js|css)(?:[?#][^'"`\s]*)?\1/g;
+// Not rewritten either: any dynamic import (static ones have no
+// parenthesis), and a source map reference (map files keep their names).
+const JS_DYNAMIC = /\bimport\s*\(|sourceMappingURL=/g;
 const CSS_LOOSE = /@import|url\(\s*['"]?[^)'"]*\.(?:js|css)\b/gi;
 
 /**
@@ -58,8 +61,8 @@ export function buildSite(srcDir: string): SiteBuild {
     for (const i of imports) {
       if (!read.has(i)) throw new Error(`site build: ${f} imports ${i}, which is not in the site`);
     }
-    const loose = src.replace(JS_IMPORT, '').match(JS_LOOSE);
-    if (loose) throw new Error(`site build: ${f} names ${loose.join(', ')} outside a static import`);
+    const loose = [...(src.replace(JS_IMPORT, '').match(JS_LOOSE) ?? []), ...(src.match(JS_DYNAMIC) ?? [])];
+    if (loose.length) throw new Error(`site build: ${f} names ${loose.join(', ')} outside a static import`);
     deps.set(f, imports);
   }
   const done = new Set<string>();
