@@ -111,7 +111,8 @@ that stack's values from the SSM parameters it publishes
 (`/vettid/service-vault/<env>/…`). They are read at deploy time, not
 imported, so the service vault's stack stays free to change them. After
 such a change, deploy this stack again. Nothing is deployed from CI. CI publishes the image
-to GHCR from `main`, and a deployment pins its digest.
+to GHCR from `main`, and a deployment pins its digest. Check the digest's provenance first
+([Verifying an image](#verifying-an-image)).
 
 What the stack makes:
 
@@ -284,6 +285,23 @@ and `ServiceName` outputs:
 
 If the secret leaked, go through the steps without waiting longer than
 steps 4 and 5 need: until step 6, the old value still opens the origin.
+
+### Verifying an image
+
+CI's `publish` job signs build provenance for each image it pushes
+(SLSA v1, GitHub artifact attestations on Sigstore's public instance),
+stored next to the image in GHCR. Check it before a digest goes into a
+deployment:
+
+```sh
+make verify-image IMAGE=ghcr.io/vettid/member-service@sha256:<digest>
+```
+
+It runs `gh attestation verify` (GitHub CLI) and passes
+only for an image built by this repository's `ci.yml` from `main` on a
+GitHub-hosted runner. The output names the source commit; it should be
+the one being deployed. Images published before provenance was added
+have none and fail the check.
 
 ## Build and test
 
