@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +40,14 @@ func TestLoadConfig(t *testing.T) {
 	if _, err := loadConfig(get); err != nil {
 		t.Fatal(err)
 	}
+	env["ORIGIN_VERIFY_SECRET_PREVIOUS"] = "short"
+	if _, err := loadConfig(get); err == nil {
+		t.Fatal("a short previous origin secret")
+	}
+	env["ORIGIN_VERIFY_SECRET_PREVIOUS"] = strings.Repeat("q", 32)
+	if _, err := loadConfig(get); err != nil {
+		t.Fatal(err)
+	}
 	delete(env, "SERVICE_VAULT_PIN")
 	if _, err := loadConfig(get); err == nil || !strings.Contains(err.Error(), "SERVICE_VAULT_PIN") {
 		t.Fatalf("missing pin: %v", err)
@@ -65,22 +75,45 @@ func TestClientIP(t *testing.T) {
 // (health checks excepted).
 func TestFromEdge(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	h := fromEdge([]byte(strings.Repeat("s", 32)), ok)
-	for _, c := range []struct {
+	s, prev := strings.Repeat("s", 32), strings.Repeat("p", 32)
+	type tc struct {
 		path, header string
 		want         int
-	}{{"/api/me", "", 403}, {"/api/me", "wrong", 403}, {"/api/me", strings.Repeat("s", 32), 204}, {"/api/health", "", 204}} {
-		r := httptest.NewRequest("GET", c.path, nil)
-		if c.header != "" {
-			r.Header.Set(OriginHeader, c.header)
-		}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != c.want {
-			t.Errorf("%s %q: %d", c.path, c.header, w.Code)
+	}
+	for previous, cases := range map[string][]tc{
+		"": {{"/api/me", "", 403}, {"/api/me", "wrong", 403}, {"/api/me", s, 204}, {"/api/me", prev, 403}, {"/api/health", "", 204}},
+		// During a rotation both the new and the previous secret pass.
+		prev: {{"/api/me", "", 403}, {"/api/me", "wrong", 403}, {"/api/me", s, 204}, {"/api/me", prev, 204}},
+	} {
+		h := fromEdge([]byte(s), []byte(previous), slog.New(slog.DiscardHandler), ok)
+		for _, c := range cases {
+			r := httptest.NewRequest("GET", c.path, nil)
+			if c.header != "" {
+				r.Header.Set(OriginHeader, c.header)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != c.want {
+				t.Errorf("previous %q, %s %q: %d", previous, c.path, c.header, w.Code)
+			}
 		}
 	}
-	if fromEdge(nil, ok) == nil {
+	// A request with the previous value is logged (once a minute), so a
+	// rotation can see when the edge has stopped sending it.
+	var buf bytes.Buffer
+	h := fromEdge([]byte(s), []byte(prev), slog.New(slog.NewTextHandler(&buf, nil)), ok)
+	for range 3 {
+		r := httptest.NewRequest("GET", "/api/me", nil)
+		r.Header.Set(OriginHeader, prev)
+		h.ServeHTTP(httptest.NewRecorder(), r)
+	}
+	r := httptest.NewRequest("GET", "/api/me", nil)
+	r.Header.Set(OriginHeader, s)
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	if n := strings.Count(buf.String(), "previous origin secret"); n != 1 {
+		t.Fatalf("logged %d times:\n%s", n, buf.String())
+	}
+	if fromEdge(nil, nil, nil, ok) == nil {
 		t.Fatal("no secret: unwrapped")
 	}
 }

@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ALARMS, API_PORT, ERROR_THRESHOLD, EXPECTED_STOP_CODES, CLIENT_IP_HEADER, WEBHOOK_HEADERS, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
+import { ALARMS, API_PORT, ERROR_THRESHOLD, EXPECTED_STOP_CODES, CLIENT_IP_HEADER, WEBHOOK_HEADERS, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, ORIGIN_SERIAL_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const base: MemberServiceStackProps = {
@@ -164,7 +164,7 @@ describe('task', () => {
     expect(env.MAIL_DIR).toBeUndefined();
     expect(env.DYNAMODB_ENDPOINT).toBeUndefined();
     const secrets = Object.fromEntries(c.Secrets.map((s: any) => [s.Name, s.ValueFrom]));
-    expect(Object.keys(secrets).sort()).toEqual(['MEMBER_API_PEPPER', 'ORIGIN_VERIFY_SECRET', 'SERVICE_VAULT_API_KEY', 'SERVICE_VAULT_PIN', 'WEBHOOK_SECRET']);
+    expect(Object.keys(secrets).sort()).toEqual(['MEMBER_API_PEPPER', 'ORIGIN_VERIFY_SECRET', 'ORIGIN_VERIFY_SECRET_PREVIOUS', 'SERVICE_VAULT_API_KEY', 'SERVICE_VAULT_PIN', 'WEBHOOK_SECRET']);
     expect(secrets.WEBHOOK_SECRET).toEqual(imported('WebhookSecretArn'));
     expect(json(secrets.SERVICE_VAULT_PIN)).toContain(':parameter/vettid/service-vault/test/tls-pin');
     for (const name of Object.keys(secrets)) expect(env[name]).toBeUndefined();
@@ -182,7 +182,7 @@ describe('task', () => {
 
   test('the generated secrets: the API key and pepper retained; nothing retained has a fixed name', () => {
     const secrets = Object.entries<any>(t.findResources('AWS::SecretsManager::Secret'));
-    expect(secrets.map(([id]) => id.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual(['OriginVerify', 'Pepper', 'ServiceVaultApiKey']);
+    expect(secrets.map(([id]) => id.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual(['OriginVerify', 'OriginVerifyPrevious', 'Pepper', 'ServiceVaultApiKey']);
     for (const [id, s] of secrets) {
       expect(s.Properties.Name).toBeUndefined();
       if (!id.startsWith('OriginVerify')) expect(s.DeletionPolicy).toBe('Retain');
@@ -194,7 +194,7 @@ describe('task', () => {
     }
   });
 
-  test('the execution role reads exactly the five task secrets', () => {
+  test('the execution role reads exactly the six task secrets', () => {
     const td = Object.values<any>(t.findResources('AWS::ECS::TaskDefinition'))[0].Properties;
     const roleId = td.ExecutionRoleArn['Fn::GetAtt'][0];
     const st = Object.values<any>(t.findResources('AWS::IAM::Policy'))
@@ -202,7 +202,7 @@ describe('task', () => {
       .flatMap((p) => p.Properties.PolicyDocument.Statement);
     const sm = st.filter((s) => [s.Action].flat().includes('secretsmanager:GetSecretValue'));
     const smResources = sm.flatMap((s) => [s.Resource].flat());
-    expect(smResources).toHaveLength(4);
+    expect(smResources).toHaveLength(5);
     expect(smResources).toContainEqual(imported('WebhookSecretArn'));
     const ssmSt = st.filter((s) => [s.Action].flat().some((a: string) => a.startsWith('ssm:')));
     expect(ssmSt).toHaveLength(1);
@@ -254,6 +254,21 @@ describe('API and site', () => {
     t.hasResourceProperties('AWS::CloudFront::OriginRequestPolicy', {
       OriginRequestPolicyConfig: Match.objectLike({ HeadersConfig: Match.objectLike({ Headers: Match.arrayWith([CLIENT_IP_HEADER]) }) }),
     });
+  });
+
+  test('originSecretSerial adds the serial header, so a deploy reads the origin secret again', () => {
+    const origin = (tt: Template) => {
+      const dist = Object.values<any>(tt.findResources('AWS::CloudFront::Distribution'))[0].Properties.DistributionConfig;
+      const api = dist.CacheBehaviors.find((b: any) => b.PathPattern === '/api/*');
+      return dist.Origins.find((o: any) => o.Id === api.TargetOriginId);
+    };
+    const headers = origin(synth({ originSecretSerial: '20261028-1900' })).OriginCustomHeaders;
+    expect(headers.map((h: any) => h.HeaderName)).toEqual([ORIGIN_HEADER, ORIGIN_SERIAL_HEADER]);
+    expect(headers[1].HeaderValue).toBe('20261028-1900');
+    expect(json(headers[0].HeaderValue)).toContain('resolve:secretsmanager');
+    for (const bad of ['a b', 'x'.repeat(65), '{{resolve:x}}']) {
+      expect(() => synth({ originSecretSerial: bad })).toThrow(/originSecretSerial/);
+    }
   });
 
   test('CloudFront forwards the webhook signature headers to /api/* (else every webhook is a 401)', () => {

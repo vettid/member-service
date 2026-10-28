@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -76,6 +77,9 @@ type cfg struct {
 	MailDir      string // MAIL_DIR: local development, instead of SES
 	ClientIPFrom string // CLIENT_IP_HEADER
 	OriginSecret []byte // ORIGIN_VERIFY_SECRET
+	// OriginPrevious is also accepted while CloudFront moves to a new
+	// ORIGIN_VERIFY_SECRET (README "Rotating the origin secret").
+	OriginPrevious []byte // ORIGIN_VERIFY_SECRET_PREVIOUS
 }
 
 // OriginHeader carries the secret the edge (CloudFront) adds to every
@@ -86,7 +90,8 @@ func loadConfig(getenv func(string) string) (*cfg, error) {
 	c := &cfg{Addr: getenv("MEMBER_API_ADDR"), VaultURL: getenv("SERVICE_VAULT_URL"), VaultKey: getenv("SERVICE_VAULT_API_KEY"),
 		VaultPin: getenv("SERVICE_VAULT_PIN"), WebhookKey: []byte(getenv("WEBHOOK_SECRET")), Pepper: []byte(getenv("MEMBER_API_PEPPER")),
 		Table: getenv("DYNAMODB_TABLE"), DynamoURL: getenv("DYNAMODB_ENDPOINT"), MailFrom: getenv("MAIL_FROM"),
-		MailDir: getenv("MAIL_DIR"), ClientIPFrom: getenv("CLIENT_IP_HEADER"), OriginSecret: []byte(getenv("ORIGIN_VERIFY_SECRET"))}
+		MailDir: getenv("MAIL_DIR"), ClientIPFrom: getenv("CLIENT_IP_HEADER"), OriginSecret: []byte(getenv("ORIGIN_VERIFY_SECRET")),
+		OriginPrevious: []byte(getenv("ORIGIN_VERIFY_SECRET_PREVIOUS"))}
 	var missing []string
 	for name, v := range map[string]string{"MEMBER_API_ADDR": c.Addr, "SERVICE_VAULT_URL": c.VaultURL, "SERVICE_VAULT_API_KEY": c.VaultKey,
 		"SERVICE_VAULT_PIN": c.VaultPin, "DYNAMODB_TABLE": c.Table} {
@@ -100,8 +105,11 @@ func loadConfig(getenv func(string) string) (*cfg, error) {
 	if len(c.WebhookKey) < webhook.MinSecretLen || len(c.Pepper) < 32 {
 		return nil, errors.New("WEBHOOK_SECRET and MEMBER_API_PEPPER must be at least 32 bytes")
 	}
-	if len(c.OriginSecret) > 0 && len(c.OriginSecret) < 32 {
-		return nil, errors.New("ORIGIN_VERIFY_SECRET must be at least 32 bytes")
+	if len(c.OriginSecret) > 0 && len(c.OriginSecret) < 32 || len(c.OriginPrevious) > 0 && len(c.OriginPrevious) < 32 {
+		return nil, errors.New("ORIGIN_VERIFY_SECRET and ORIGIN_VERIFY_SECRET_PREVIOUS must be at least 32 bytes")
+	}
+	if len(c.OriginPrevious) > 0 && len(c.OriginSecret) == 0 {
+		return nil, errors.New("ORIGIN_VERIFY_SECRET_PREVIOUS needs ORIGIN_VERIFY_SECRET")
 	}
 	if c.ClientIPFrom != "" && len(c.OriginSecret) == 0 {
 		// The header is trusted only from the edge.
@@ -117,17 +125,35 @@ func loadConfig(getenv func(string) string) (*cfg, error) {
 // the origin cannot be reached around CloudFront and the client-address
 // header cannot be forged. /api/health is exempt (the load balancer's
 // and ECS's checks come straight to the task).
-func fromEdge(secret []byte, next http.Handler) http.Handler {
+func fromEdge(secret, previous []byte, log *slog.Logger, next http.Handler) http.Handler {
 	if len(secret) == 0 {
 		return next
 	}
+	var logged atomic.Int64 // when "previous origin secret" was last logged (Unix seconds)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/health" && subtle.ConstantTimeCompare([]byte(r.Header.Get(OriginHeader)), secret) != 1 {
+		got := []byte(r.Header.Get(OriginHeader))
+		cur := subtle.ConstantTimeCompare(got, secret)
+		prev := subtle.ConstantTimeCompare(got, previous) & btoi(len(previous) > 0)
+		if prev == 1 && cur == 0 {
+			// The edge still sends the previous value: a rotation must not
+			// retire it yet (README "Rotating the origin secret").
+			if now, last := time.Now().Unix(), logged.Load(); now-last >= 60 && logged.CompareAndSwap(last, now) {
+				log.Info("request with the previous origin secret")
+			}
+		}
+		if r.URL.Path != "/api/health" && cur|prev != 1 {
 			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // clientIP reads the visitor's address from a header the edge sets and
@@ -178,7 +204,7 @@ func serve(log *slog.Logger, getenv func(string) string) error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	srv := &http.Server{Addr: c.Addr, Handler: fromEdge(c.OriginSecret, mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+	srv := &http.Server{Addr: c.Addr, Handler: fromEdge(c.OriginSecret, c.OriginPrevious, log, mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn)}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
