@@ -72,8 +72,9 @@ export interface StaticSiteProps {
    * (HASHED_ASSET, e.g. `js/connect.3f2a9c1b04de.js`, from buildSite).
    * They are cached for a year as immutable, kept across deploys (pages
    * loaded before a deploy still find theirs), and passed to S3 by the
-   * 404 check whether or not they are in this build. member-service
-   * addition to vettid.org's construct.
+   * 404 check when the file they are a version of is in this build
+   * (`js/connect.<any hash>.js`; a made-up name gets the branded 404).
+   * member-service addition to vettid.org's construct.
    */
   readonly hashedAssets?: boolean;
 }
@@ -235,13 +236,21 @@ export class StaticSite extends Construct {
         'strict-transport-security': { value: 'max-age=31536000; includeSubDomains' },
         'permissions-policy': { value: 'camera=(), microphone=(), geolocation=(), payment=()' },
       };
+      // Hashed assets: the files they are versions of, e.g.
+      // "/js/connect.js" for any /js/connect.<hash>.js.
+      const bases = props.hashedAssets ? known.filter((f) => HASHED_ASSET.test(f)).map((f) => f.replace(HASHED_ASSET, '.$1')) : [];
+      const hashedCheck = props.hashedAssets
+        ? ` && !((m = uri.match(/^(\\/[a-z0-9._/-]+)\\.[0-9a-f]{${HASH_LENGTH}}\\.(js|css)$/)) && HASHED[m[1] + '.' + m[2]])`
+        : '';
       notFound = `
-  if (!FILES[uri]${props.hashedAssets ? ` && !${HASHED_ASSET}.test(uri)` : ''}) {
+  var m;
+  if (!FILES[uri]${hashedCheck}) {
     return { statusCode: 404, statusDescription: 'Not Found', headers: ${JSON.stringify(fnHeaders)},
       body: { encoding: 'text', data: NOT_FOUND } };
   }
 `;
       notFound = `var FILES = ${JSON.stringify(Object.fromEntries(known.map((f) => [f, 1])))};
+var HASHED = ${JSON.stringify(Object.fromEntries(bases.map((f) => [f, 1])))};
 var NOT_FOUND = ${JSON.stringify(page)};
 @@CHECK@@${notFound}`;
     }
@@ -347,7 +356,7 @@ function handler(event) {
           cacheControl: [s3deploy.CacheControl.fromString('public, max-age=31536000, immutable')],
         })
       : undefined;
-    new s3deploy.BucketDeployment(this, 'DeployAssets', {
+    const assets = new s3deploy.BucketDeployment(this, 'DeployAssets', {
       sources: [content],
       destinationBucket: this.bucket,
       exclude: [...revalidate, ...hashed],
@@ -369,6 +378,10 @@ function handler(event) {
       distribution: this.distribution,
       distributionPaths: ['/*'],
     });
-    if (immutable) html.node.addDependency(immutable);
+    if (immutable) {
+      html.node.addDependency(immutable);
+      // Its prune (files gone from the site) after the new pages are up.
+      assets.node.addDependency(html);
+    }
   }
 }

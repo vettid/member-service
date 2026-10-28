@@ -41,6 +41,20 @@ func TestSessionEndsOnRemovedMarker(t *testing.T) {
 	}
 }
 
+// A session whose connection's suspension was handled ends, even when
+// the roster entry is not marked (a connection.added that wrote it after
+// the suspension and failed before its second check).
+func TestSessionEndsOnSuspendedMarker(t *testing.T) {
+	f := newFixture(t)
+	f.verify()
+	f.hook("01EVADDED", "connection.added", "c1", map[string]any{"invite_id": "inv1", "name": "Ada"})
+	f.do("GET", "/api/connect/status", "")
+	_ = f.st.Put(context.Background(), kindSuspended, "c1", nil, f.now.Add(RemovedTTL), false)
+	if w := f.do("GET", "/api/me", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("me with the suspended marker: %d", w.Code)
+	}
+}
+
 // A source past StartsPerSource connect starts an hour is refused (429)
 // before anything is written for it.
 func TestConnectStartsPerSource(t *testing.T) {

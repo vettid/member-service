@@ -310,13 +310,26 @@ describe('API and site', () => {
     expect(assets.Properties.Exclude).toEqual(expect.arrayContaining(globs));
     expect(pages.Properties.Include).toEqual(expect.arrayContaining(['*.html']));
     expect(pages.DependsOn).toEqual(expect.arrayContaining([immutableId]));
+    const pagesId = Object.keys(resources).find((id) => resources[id] === pages)!;
+    expect(assets.DependsOn).toEqual(expect.arrayContaining([pagesId]));
   });
 
-  test('site: the 404 check passes any hashed asset name to S3', () => {
-    const fn = Object.values<any>(t.findResources('AWS::CloudFront::Function'))[0].Properties.FunctionCode as string;
-    expect(fn).toContain('!/\\.[0-9a-f]{12}\\.(js|css)$/.test(uri)');
-    expect(fn).toMatch(/"\/js\/connect\.[0-9a-f]{12}\.js":1/);
-    expect(fn).not.toContain('"/js/connect.js"');
+  test('site: the 404 check passes hashed versions of the site\'s files to S3, and only those', () => {
+    const code = Object.values<any>(t.findResources('AWS::CloudFront::Function'))[0].Properties.FunctionCode as string;
+    const handler = new Function(`${code}; return handler;`)();
+    const status = (uri: string) => {
+      const out = handler({ request: { uri, cookies: {} } });
+      return out.statusCode ?? 'pass';
+    };
+    const connect = /"(\/js\/connect\.[0-9a-f]{12}\.js)":1/.exec(code)![1];
+    expect(status(connect)).toBe('pass'); // this build's
+    expect(status('/js/connect.0123456789ab.js')).toBe('pass'); // an earlier deploy's
+    expect(status('/js/vendor/qrcode-generator.0123456789ab.js')).toBe('pass');
+    expect(status('/styles.0123456789ab.css')).toBe('pass');
+    expect(status('/js/x.000000000000.js')).toBe(404); // not a version of a site file
+    expect(status('/js/connect.0123456789ab.css')).toBe(404);
+    expect(status('/js/connect.js')).toBe(404); // the unhashed name is not published
+    expect(status('/connect/')).toBe('pass');
   });
 });
 

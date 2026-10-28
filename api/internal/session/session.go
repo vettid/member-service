@@ -657,23 +657,24 @@ func applyInviteStatus(f *flow, st *servicevault.InviteStatus) {
 
 // --- sessions ---
 
-// errRemoved: the connection was removed; it never gets a session again.
-var errRemoved = errors.New("session: connection removed")
+// errRemoved: the connection was removed or suspended; it never gets a
+// session again (a suspended member connects again, as a new connection).
+var errRemoved = errors.New("session: connection removed or suspended")
 
 // startSession makes a session for the connection and sets its cookie,
 // ending the session the browser had (perhaps someone else's). The
 // roster entry is created if the connection.added webhook has not
 // arrived yet (it fills in the name), unless the connection was removed
-// in the meantime (errRemoved). A removal webhook writes its marker
-// before it deletes the entry, so the check after the write catches one
-// that ran between the first check and the write.
+// or suspended in the meantime (errRemoved). A removal or suspension
+// webhook writes its marker before it changes the entry, so the check
+// after the write catches one that ran between the first check and the
+// write.
 func (s *Server) startSession(ctx context.Context, w http.ResponseWriter, r *http.Request, connID string) error {
 	if connID == "" {
 		return errors.New("session: no connection")
 	}
 	removed := func() (bool, error) {
-		_, ok, err := s.Store.Get(ctx, kindRemoved, connID)
-		return ok, err
+		return s.ended(ctx, connID)
 	}
 	if gone, err := removed(); err != nil {
 		return err
@@ -730,13 +731,14 @@ func (s *Server) Member(ctx context.Context, r *http.Request) (connID string, m 
 		return "", nil, false, err
 	}
 	if found {
-		// The removal marker counts too: a roster entry put back by a
-		// race must not keep a removed member's sessions alive.
-		_, removed, err := s.Store.Get(ctx, kindRemoved, sr.ConnID)
+		// The markers count too: a roster entry put back or not yet
+		// marked by a race must not keep a removed or suspended member's
+		// sessions alive.
+		ended, err := s.ended(ctx, sr.ConnID)
 		if err != nil {
 			return "", nil, false, err
 		}
-		found = !removed && !m.Suspended
+		found = !ended && !m.Suspended
 	}
 	if !found {
 		_ = s.Store.Delete(ctx, kindSession, tokenKey(t))
@@ -902,6 +904,15 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 		return s.updateSignIn(ctx, ev.SignInID, func(f *signIn) { f.Stage = signInExpired })
 	}
 	return nil
+}
+
+// ended reports whether the connection's removal or suspension was
+// handled: it gets no session.
+func (s *Server) ended(ctx context.Context, connID string) (bool, error) {
+	if _, removed, err := s.Store.Get(ctx, kindRemoved, connID); err != nil || removed {
+		return removed, err
+	}
+	return s.suspended(ctx, connID)
 }
 
 // suspended reports whether the connection's suspension was handled.
