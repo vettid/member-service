@@ -33,6 +33,9 @@ test('HTML: no inline script, style or handlers; local references exist', () => 
     assert.doesNotMatch(s, /<style\b|\sstyle="/, `${where}: inline style`);
     assert.doesNotMatch(s, /\son[a-z]+="/, `${where}: inline handler`);
     assert.match(s, /<meta name="referrer" content="no-referrer">/, `${where}: referrer`);
+    // A form submitted before its script has run must not put an address
+    // or a code in a URL (and the CloudFront logs): POST, never GET.
+    for (const m of s.matchAll(/<form\b[^>]*>/g)) assert.match(m[0], /method="post"/, `${where}: ${m[0]}`);
     for (const m of s.matchAll(/<(\w+)[^>]*\s(src|href)="([^"]+)"/g)) {
       const [, tag, attr, ref] = m;
       // Links may leave the site; anything the page loads may not.

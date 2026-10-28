@@ -48,17 +48,18 @@ func (m *mailbox) code(to string) string {
 
 // vault is the fake service vault.
 type vault struct {
-	mu       sync.Mutex
-	invites  []string // emails, verified
-	status   map[string]*servicevault.InviteStatus
-	polls    int
-	inviteNo int
-	now      func() time.Time
-	signins  map[string]*servicevault.SignInStatus
-	starts   []servicevault.SignInRequest
-	admins   []string
-	adminErr error
-	adminAsk int
+	mu        sync.Mutex
+	invites   []string // emails, verified
+	status    map[string]*servicevault.InviteStatus
+	polls     int
+	inviteNo  int
+	now       func() time.Time
+	signins   map[string]*servicevault.SignInStatus
+	starts    []servicevault.SignInRequest
+	admins    []string
+	adminErr  error
+	adminAsk  int
+	inviteURL string // "" for the usual https link
 }
 
 func (v *vault) CreateInvite(_ context.Context, email string, ev servicevault.EmailVerification) (*servicevault.Invite, error) {
@@ -71,7 +72,11 @@ func (v *vault) CreateInvite(_ context.Context, email string, ev servicevault.Em
 	v.inviteNo++
 	id := fmt.Sprintf("inv%d", v.inviteNo)
 	v.status[id] = &servicevault.InviteStatus{ID: id, Status: servicevault.InviteStatusWaiting}
-	return &servicevault.Invite{ID: id, URL: "https://vettid.org/i/" + id, ExpiresAt: v.now().Add(10 * time.Minute)}, nil
+	u := "https://vettid.org/i/" + id
+	if v.inviteURL != "" {
+		u = v.inviteURL
+	}
+	return &servicevault.Invite{ID: id, URL: u, ExpiresAt: v.now().Add(10 * time.Minute)}, nil
 }
 
 func (v *vault) InviteStatus(_ context.Context, id string) (*servicevault.InviteStatus, error) {

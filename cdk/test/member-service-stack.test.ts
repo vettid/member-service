@@ -147,6 +147,7 @@ describe('task', () => {
     const c = container();
     expect(c.Image).toBe(base.image);
     expect(c.ReadonlyRootFilesystem).toBe(true);
+    expect(c.LinuxParameters.Capabilities.Drop).toEqual(['ALL']);
     expect(c.HealthCheck.Command).toEqual(['CMD', '/member-api', 'healthcheck']);
     expect(c.PortMappings).toEqual([expect.objectContaining({ ContainerPort: API_PORT })]);
   });

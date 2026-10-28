@@ -24,6 +24,11 @@ const (
 	// SignInTTL is how long the browser waits: the challenge's five-minute
 	// exp (plan 0.6.1) and a minute for a late answer.
 	SignInTTL = 6 * time.Minute
+	// SignInWait is the challenge's exp (plan 0.6.1): a sign-in for an
+	// address that is no member's ends then, when the service vault
+	// expires it. A denied one is answered pending until the same time,
+	// so that how soon it ends says nothing about the address.
+	SignInWait = 5 * time.Minute
 	// SignInsPerSource caps sign-ins from one client address (an IPv6 /64)
 	// per hour, before the service vault is asked. It is per source only,
 	// so it says nothing about an address.
@@ -66,6 +71,7 @@ type signIn struct {
 	ConnID     string    `json:"connection_id,omitempty"`
 	KeyChanged bool      `json:"key_changed,omitempty"`
 	ConfirmBy  time.Time `json:"confirm_by,omitempty"` // the confirmation's end
+	Started    time.Time `json:"started,omitzero"`
 	Polled     time.Time `json:"polled,omitempty"`
 	Exp        time.Time `json:"exp"`
 }
@@ -107,7 +113,8 @@ func (s *Server) signInStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fk := tokenKey(id)
-	f := &signIn{ID: si.ID, EmailKey: s.mac("email", addr), MatchCode: si.MatchCode, Stage: signInPending, Exp: s.now().Add(SignInTTL)}
+	f := &signIn{ID: si.ID, EmailKey: s.mac("email", addr), MatchCode: si.MatchCode, Stage: signInPending, Exp: s.now().Add(SignInTTL),
+		Started: s.now()}
 	if err := s.putJSON(ctx, kindSignIn, fk, f, f.Exp, true); err != nil {
 		s.fail(w, "store", err)
 		return
@@ -219,10 +226,15 @@ func (s *Server) signInStatus(w http.ResponseWriter, r *http.Request) {
 	case signInConfirm:
 		writeJSON(w, http.StatusOK, map[string]any{"status": signInConfirm, "code_sent": f.CodeSent, "expires_at": f.Exp.UTC()})
 	default:
-		// Denied and expired look alike to the browser: an unknown address
-		// always expires, and a member's vault can turn a challenge down
-		// without the member (its ask gate), so "denied" would say the
-		// address is a member's (§4.2: the same screen either way).
+		// Denied and expired look alike to the browser, and at the same
+		// time: an unknown address always expires at SignInWait, and a
+		// member's vault can turn a challenge down at once without the
+		// member (its ask gate), so an early "ended" would say the address
+		// is a member's (§4.2: the same screen either way).
+		if s.now().Before(f.Started.Add(SignInWait)) {
+			writeJSON(w, http.StatusOK, map[string]any{"status": signInPending, "match_code": f.MatchCode, "expires_at": f.Exp.UTC()})
+			return
+		}
 		end(signInEnded)
 	}
 }
@@ -289,7 +301,7 @@ func (s *Server) signInConfirmStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "wrong_email")
 		return
 	}
-	code, err := s.newCode(ctx, r, f.EmailKey, fk[:16])
+	code, err := s.newCode(ctx, r, "confirm", f.EmailKey, fk[:16])
 	if err != nil {
 		s.fail(w, "code", err)
 		return
@@ -402,12 +414,14 @@ type adminCache struct {
 	mu    sync.Mutex
 	set   map[string]bool
 	until time.Time
-	gen   uint64 // counts webhook updates
+	gen   uint64    // counts webhook updates
+	at    time.Time // the latest webhook's event time
 }
 
 // setAdmins keeps an admin set. An answer to an ask (gen is the count
-// when it started) does not replace a webhook's newer set.
-func (s *Server) setAdmins(ids []string, fromHook bool, gen uint64) {
+// when it started) does not replace a webhook's newer set, and a webhook
+// older than the one applied (a late redelivery) is ignored.
+func (s *Server) setAdmins(ids []string, fromHook bool, gen uint64, at time.Time) {
 	set := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		set[id] = true
@@ -415,7 +429,11 @@ func (s *Server) setAdmins(ids []string, fromHook bool, gen uint64) {
 	s.admins.mu.Lock()
 	defer s.admins.mu.Unlock()
 	if fromHook {
+		if at.Before(s.admins.at) {
+			return
+		}
 		s.admins.gen++
+		s.admins.at = at
 	} else if gen != s.admins.gen {
 		return
 	}
@@ -438,7 +456,7 @@ func (s *Server) isAdmin(ctx context.Context, connID string) bool {
 		s.log().Warn("admins", "err", errName(err))
 		return false
 	}
-	s.setAdmins(a.Admins, false, gen)
+	s.setAdmins(a.Admins, false, gen, time.Time{})
 	return slices.Contains(a.Admins, connID)
 }
 

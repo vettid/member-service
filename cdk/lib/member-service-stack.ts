@@ -282,9 +282,14 @@ export class MemberServiceStack extends cdk.Stack {
         )
       : ecs.ContainerImage.fromRegistry(props.image);
 
+    // No Linux capabilities: the binary needs none (it listens on an
+    // unprivileged port as a non-root user).
+    const linuxParameters = new ecs.LinuxParameters(this, 'Linux');
+    linuxParameters.dropCapabilities(ecs.Capability.ALL);
     taskDef.addContainer('MemberApi', {
       image: containerImage,
       essential: true,
+      linuxParameters,
       portMappings: [{ containerPort: API_PORT }],
       readonlyRootFilesystem: true,
       environment: {
