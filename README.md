@@ -114,12 +114,14 @@ to GHCR from `main`, and a deployment pins its digest.
 What the stack makes:
 
 - **The site:** `web/` on S3 and CloudFront at `hostName`, using
-  vettid.org's StaticSite construct (`cdk/lib/static-site.ts`, an
-  unchanged copy of vettid.org `lib/constructs/static-site.ts`). It has
+  vettid.org's StaticSite construct (`cdk/lib/static-site.ts`, a copy of
+  vettid.org `lib/constructs/static-site.ts` with one addition,
+  `apiForwardHeaders`, for the webhook signature headers). It has
   that construct's CSP, headers and branded 404, and a certificate in the
   zone.
 - **`/api/*`:** CloudFront forwards it to an API Gateway HTTP API, adding
-  `X-Origin-Verify` (a generated secret) and `CloudFront-Viewer-Address`.
+  `X-Origin-Verify` (a generated secret) and `CloudFront-Viewer-Address`,
+  and passing the webhooks' `VettID-Signature` and `VettID-Event-Id`.
   The HTTP API reaches the task through a VPC link and Cloud Map
   (`member-api`, SRV, in the service vault's namespace). There's no load
   balancer.

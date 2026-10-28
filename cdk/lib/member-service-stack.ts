@@ -35,6 +35,13 @@ export const TASK_MEMORY_MIB = 512;
 /** The header CloudFront adds to every /api/* request (member-api OriginHeader). */
 export const ORIGIN_HEADER = 'X-Origin-Verify';
 
+/**
+ * The service vault's webhook headers (service-vault sdk/go/webhook
+ * HeaderSignature, HeaderEventID): CloudFront forwards only an allow list
+ * to /api/*, and without these every webhook is refused (401).
+ */
+export const WEBHOOK_HEADERS = ['VettID-Signature', 'VettID-Event-Id'];
+
 /** The header CloudFront sets with the viewer's address (CLIENT_IP_HEADER). */
 export const CLIENT_IP_HEADER = 'CloudFront-Viewer-Address';
 
@@ -388,6 +395,7 @@ export class MemberServiceStack extends cdk.Stack {
       notFoundPage: '404.html',
       apiOriginDomain: `${this.api.apiId}.execute-api.${this.region}.${this.urlSuffix}`,
       apiOriginHeaders: { [ORIGIN_HEADER]: originSecret.secretValue.unsafeUnwrap() },
+      apiForwardHeaders: WEBHOOK_HEADERS,
     });
 
     // ---- Alarms ---------------------------------------------------------------

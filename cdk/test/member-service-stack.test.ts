@@ -2,7 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ALARMS, API_PORT, CLIENT_IP_HEADER, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
+import { ALARMS, API_PORT, CLIENT_IP_HEADER, WEBHOOK_HEADERS, MemberServiceStack, MemberServiceStackProps, ORIGIN_HEADER, SERVICE_VAULT_API_PORT, TASK_CPU, TASK_MEMORY_MIB } from '../lib/member-service-stack';
 
 const DIGEST = 'sha256:' + 'a'.repeat(64);
 const base: MemberServiceStackProps = {
@@ -254,6 +254,12 @@ describe('API and site', () => {
     t.hasResourceProperties('AWS::CloudFront::OriginRequestPolicy', {
       OriginRequestPolicyConfig: Match.objectLike({ HeadersConfig: Match.objectLike({ Headers: Match.arrayWith([CLIENT_IP_HEADER]) }) }),
     });
+  });
+
+  test('CloudFront forwards the webhook signature headers to /api/* (else every webhook is a 401)', () => {
+    const policy = Object.values<any>(t.findResources('AWS::CloudFront::OriginRequestPolicy'))[0].Properties.OriginRequestPolicyConfig;
+    const headers: string[] = policy.HeadersConfig.Headers;
+    for (const h of [...WEBHOOK_HEADERS, 'Content-Type', CLIENT_IP_HEADER]) expect(headers).toContain(h);
   });
 
   test('the site has its CSP (StaticSite) and a branded 404', () => {
