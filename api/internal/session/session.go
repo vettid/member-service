@@ -311,6 +311,10 @@ type Member struct {
 	Name       string    `json:"name"`
 	Joined     time.Time `json:"joined"`
 	EmailBound bool      `json:"email_bound"`
+	// Suspended: the service vault stopped the connection
+	// (connection.suspended). It can't sign in until the member connects
+	// again, which replaces the entry; its sessions end at their next use.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 func (s *Server) getJSON(ctx context.Context, kind, id string, v any) (bool, error) {
@@ -729,7 +733,7 @@ func (s *Server) Member(ctx context.Context, r *http.Request) (connID string, m 
 		if err != nil {
 			return "", nil, false, err
 		}
-		found = !removed
+		found = !removed && !m.Suspended
 	}
 	if !found {
 		_ = s.Store.Delete(ctx, kindSession, tokenKey(t))
@@ -842,6 +846,24 @@ func (s *Server) handle(ctx context.Context, e servicevault.Event) error {
 			return err
 		}
 		return s.Store.Delete(ctx, kindMember, h.ConnectionID)
+	case *servicevault.ConnectionSuspended:
+		// Kept on the roster, marked: an admin sees who must connect
+		// again. Only an entry already there is changed.
+		var m Member
+		if ok, err := s.getJSON(ctx, kindMember, h.ConnectionID, &m); err != nil || !ok {
+			return err
+		}
+		m.Suspended = true
+		if err := s.putJSON(ctx, kindMember, h.ConnectionID, &m, time.Time{}, false); err != nil {
+			return err
+		}
+		// A removal handled meanwhile: as for ConnectionAdded.
+		if _, removed, err := s.Store.Get(ctx, kindRemoved, h.ConnectionID); err != nil {
+			return err
+		} else if removed {
+			return s.Store.Delete(ctx, kindMember, h.ConnectionID)
+		}
+		return nil
 	case *servicevault.SignInApproved:
 		if h.ConnectionID == "" {
 			return nil

@@ -1,6 +1,6 @@
 # vettid.org Member Service & Service Vault — Plan
 
-**Version:** 0.6.3 (draft)
+**Version:** 0.6.4 (draft)
 **Status:** Planning — Phase 1 targeted before 2026-11-15
 **Owner:** Al Liebl
 **Repos:** `vettid/service-vault` (new; replaces the retired `vettid/vettid-service-vault`), `vettid/member-service` (new), `vettid/vettid-vault` (member vault: service connections, contracts, votes), `vettid/vettid-relay` (`relayclient`), `vettid/vettid.org` (specs), `vettid/vettid-android`, `vettid/vettid-ios`
@@ -143,7 +143,7 @@ Adds: may approve governance actions as one of n admins. Issued only to the admi
 
 ## 6. Member service features
 
-- **Membership:** roster = connections (later: connections with an active member contract). Everyone is provisional during the beta. Members see only the roster's size; admins also see names and join dates (owner decision 2026-10-27). Paid status needs payments (not yet built) and a service-callable status route on the member API (does not exist; `GET /api/account/me` is member-session only) — both later.
+- **Membership:** roster = connections (later: connections with an active member contract). Everyone is provisional during the beta. Members see only the roster's size; admins also see names and join dates (owner decision 2026-10-27). A connection the service vault suspends (`connection.suspended`, after a rotation conflict, VAULT-MESSAGING §3.4) stays on the roster marked for admins, isn't counted, and its sessions end; the member's next connection replaces it (chosen; not in the spec). Paid status needs payments (not yet built) and a service-callable status route on the member API (does not exist; `GET /api/account/me` is member-session only) — both later.
 - **Proposals and voting:** proposal = title, body, options, record date, open/close (window ≤ 7 days), quorum rule, binding flag; signed by the service vault; secret ballot per §8; no vote changes before close (decided); threaded comments, members only. Binding votes must match the LLC operating agreement — counsel review before the first binding vote.
 - **Beta program:** cohorts invited in waves; assignments as task cards with signed completions and optional structured feedback; bugs route to a GitHub issue template; admin dashboard of completion and activity derived from signed completions.
 - **Notifications:** delivered as feed events from the member's vault; categories map onto existing feed kinds and priorities (`urgent` exists). A notification/sound spec for service events is to be written — NOTIFICATION-SOUND-SPEC.md does not exist yet.
@@ -371,6 +371,7 @@ Decided and closed: service vault model; no enclave; service vault rebuilt from 
 
 ## Changelog
 
+- **0.6.4** — Suspended connections: the service vault's `connection.suspended` webhook; the roster marks them for admins and doesn't count them, and their sessions end (§6).
 - **0.6.3** — Changed-key sign-ins (owner decision 2026-10-27): an approval with `key_changed` needs an emailed code before a session, and alerts (§4.2 step 6).
 - **0.6.2** — Roster visibility (owner decision 2026-10-27): members see the member count; admins also see names and join dates (§6).
 - **0.6.1** — Sign-in challenge `exp` five minutes, not two (owner decision 2026-10-27): on the first staging run, two sign-ins expired while the member found the request on the phone and entered the credential password. VAULT-MESSAGING §10.4 allows up to ten (§4.2, 1.4).

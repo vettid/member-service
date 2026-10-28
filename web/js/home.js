@@ -21,7 +21,8 @@ async function load() {
   if (Array.isArray(r.members)) {
     const list = $('roster');
     fill(list, r.members.map((m) =>
-      el('li', {}, el('span', {}, m.name || 'Name not shared yet'), el('span', { class: 'muted' }, 'joined ', date(m.joined)))));
+      el('li', {}, el('span', {}, m.name || 'Name not shared yet'),
+        el('span', { class: 'muted' }, 'joined ', date(m.joined), m.suspended ? ' · suspended, must connect again' : ''))));
     list.hidden = false;
   }
 }
