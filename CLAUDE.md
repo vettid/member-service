@@ -5,7 +5,7 @@ Guidance for Claude Code working in this repository.
 ## What this is
 
 `member.vettid.org`: a static site (`web/`) and a Go backend (`api/`)
-for membership, proposals and secret-ballot voting, and the beta
+for membership, proposals and verifiable voting, and the beta
 program. It talks to the VettID service vault only through its Go SDK
 and signed webhooks, the way any third-party application would. It holds
 sessions and member-authored content; it holds no VettID keys and no
