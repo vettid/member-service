@@ -361,13 +361,19 @@ function handler(event) {
           cacheControl: [s3deploy.CacheControl.fromString('public, max-age=31536000, immutable')],
         })
       : undefined;
-    const assets = new s3deploy.BucketDeployment(this, 'DeployAssets', {
+    const assetOptions = {
       sources: [content],
       destinationBucket: this.bucket,
       exclude: [...revalidate, ...hashed],
       cacheControl: [s3deploy.CacheControl.fromString('public, max-age=604800')],
-      distribution: this.distribution,
-      distributionPaths: ['/*'],
+    };
+    // With hashedAssets the weekly pass uploads before the pages (a new
+    // font or image is there before a page names it) without pruning,
+    // and a second pass with the same filters prunes after them (a file
+    // a page still being replaced names stays until then).
+    const assets = new s3deploy.BucketDeployment(this, 'DeployAssets', {
+      ...assetOptions,
+      ...(props.hashedAssets ? { prune: false } : { distribution: this.distribution, distributionPaths: ['/*'] }),
     });
     const html = new s3deploy.BucketDeployment(this, 'DeployHtml', {
       sources: [
@@ -384,9 +390,13 @@ function handler(event) {
       distributionPaths: ['/*'],
     });
     if (immutable) {
-      html.node.addDependency(immutable);
-      // Its prune (files gone from the site) after the new pages are up.
-      assets.node.addDependency(html);
+      html.node.addDependency(immutable, assets);
+      const prune = new s3deploy.BucketDeployment(this, 'PruneAssets', {
+        ...assetOptions,
+        distribution: this.distribution,
+        distributionPaths: ['/*'],
+      });
+      prune.node.addDependency(html);
     }
   }
 }
