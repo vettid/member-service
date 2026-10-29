@@ -233,7 +233,6 @@ jobs:
     runs-on: ubuntu-26.04
     needs: [publish]
     permissions:
-      contents: read
       packages: write
       id-token: write
       attestations: write
