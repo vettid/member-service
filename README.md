@@ -1,7 +1,7 @@
 # VettID Member Service
 
 `member.vettid.org`: the member-governed side of vettid.org, covering
-membership, proposals with secret-ballot voting, and the beta program
+membership, proposals with verifiable voting, and the beta program
 (cohorts, assignments, feedback). It is the first service built on
 VettID. It connects with members through the
 [VettID service vault](https://github.com/vettid/service-vault) using the
